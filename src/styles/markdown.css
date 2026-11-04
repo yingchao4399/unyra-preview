@@ -1,0 +1,320 @@
+/* 本文件负责：超级导师回复的 Markdown 渲染与回溯式学习知识图 */
+/* ---------- 超级导师回复的 Markdown 渲染 ---------- */
+
+.moji-agent-md {
+  font-size: 13.5px;
+  line-height: 1.72;
+  letter-spacing: 0.015em;
+  color: var(--color-ink);
+  overflow-wrap: break-word;
+}
+.moji-agent-md > :first-child {
+  margin-top: 0;
+}
+.moji-agent-md > :last-child {
+  margin-bottom: 0;
+}
+.moji-agent-md p {
+  margin: 0.5em 0;
+}
+.moji-agent-md h1,
+.moji-agent-md h2,
+.moji-agent-md h3,
+.moji-agent-md h4 {
+  font-weight: 600;
+  color: var(--color-ink-strong);
+  margin: 0.9em 0 0.4em;
+  font-size: 1.06em;
+}
+.moji-agent-md ul,
+.moji-agent-md ol {
+  margin: 0.45em 0;
+  padding-left: 1.4em;
+}
+.moji-agent-md ul {
+  list-style: disc;
+}
+.moji-agent-md ol {
+  list-style: decimal;
+}
+.moji-agent-md li {
+  margin: 0.2em 0;
+}
+.moji-agent-md li::marker {
+  color: var(--color-ink-faint);
+}
+.moji-agent-md a {
+  color: var(--color-seal);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/*
+ * 正文里的图片：宽度不许超过容器，高度按比例走。
+ *
+ * 这条原先只写在 .note-preview img 上，而对话气泡与公告弹窗用的是 .moji-agent-md——
+ * 少了它，一张稍微大点的图会把气泡/弹窗横向撑破（图片的固有宽度不认容器）。
+ * 远程图片（https:）是正经内容，CSP 的 img-src 已放行，见 electron/csp.ts。
+ *
+ * `display: inline-block` 与 .note-preview img 上那条同源（见 styles/typography.css）：
+ * preflight 把 img 设成了块级，徽章与行内插图因此会各占一行。
+ */
+.moji-agent-md img {
+  display: inline-block;
+  vertical-align: middle;
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+.moji-agent-md strong,
+.moji-agent-md b {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 0.09em;
+  color: color-mix(in srgb, var(--color-ink-strong) 88%, var(--color-seal-deep) 12%);
+}
+.moji-agent-md em,
+.moji-agent-md i {
+  font-style: italic;
+  padding: 0 0.08em;
+  color: color-mix(in srgb, var(--color-quote-ink) 72%, var(--color-seal-deep) 28%);
+}
+.moji-agent-md strong em,
+.moji-agent-md em strong,
+.moji-agent-md b i,
+.moji-agent-md i b {
+  color: color-mix(in srgb, var(--color-ink-strong) 70%, var(--color-seal-deep) 30%);
+}
+/*
+ * 过程件的展开体（提示词模块 / 注入块 / 工具旁白）：与折叠行同一档的小字与暗色。
+ * 它们是「上下文里补了什么」的旁注，不是给用户读的正文——照搬正文的 13.5px 与
+ * ink 亮色，会把旁边 12px 的过程行衬成一片又大又晃的字（用户报的那个观感）。
+ */
+.moji-agent-md.moji-md-soft {
+  font-size: 11.5px;
+  line-height: 1.62;
+  color: var(--color-ink-soft);
+}
+.moji-md-soft strong,
+.moji-md-soft b {
+  color: var(--color-ink);
+  font-weight: 600;
+}
+.moji-md-soft h1,
+.moji-md-soft h2,
+.moji-md-soft h3,
+.moji-md-soft h4 {
+  color: var(--color-ink);
+  font-size: 1em;
+}
+/* 不自带颜色的变体：颜色听外层容器的（工具卡里要染警示色的头行用） */
+.moji-agent-md.moji-md-plain {
+  font-size: 11.5px;
+  line-height: 1.62;
+  color: inherit;
+}
+.moji-md-plain strong,
+.moji-md-plain b {
+  color: inherit;
+  font-weight: 700;
+}
+.moji-md-plain h1,
+.moji-md-plain h2,
+.moji-md-plain h3,
+.moji-md-plain h4 {
+  color: inherit;
+  font-size: 1em;
+}
+.moji-agent-md code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: color-mix(in srgb, var(--color-code) 65%, transparent);
+  border: 1px solid var(--color-line);
+  border-radius: 4px;
+  padding: 0.05em 0.32em;
+  color: var(--color-seal-deep);
+}
+.moji-agent-md pre {
+  margin: 0.6em 0;
+  padding: 0.6em 0.8em;
+  overflow-x: auto;
+  background: color-mix(in srgb, var(--color-sunken) 75%, transparent);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  line-height: 1.6;
+}
+.moji-agent-md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-ink);
+}
+.moji-agent-md blockquote {
+  margin: 0.6em 0;
+  padding: 0.35em 0.8em;
+  border-left: 3px solid var(--color-seal);
+  background: color-mix(in srgb, var(--color-inset) 70%, transparent);
+  border-radius: 0;
+  color: var(--color-quote-ink);
+}
+.moji-agent-md blockquote p {
+  margin: 0.15em 0;
+}
+.moji-agent-md table {
+  margin: 0.6em 0;
+  border-collapse: collapse;
+  font-size: 0.94em;
+}
+.moji-agent-md th,
+.moji-agent-md td {
+  border: 1px solid var(--color-line-strong);
+  padding: 0.3em 0.6em;
+}
+.moji-agent-md th {
+  background: color-mix(in srgb, var(--color-inset) 70%, transparent);
+  font-weight: 600;
+}
+.moji-agent-md tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--color-sunken) 45%, transparent);
+}
+.moji-agent-md hr {
+  margin: 0.9em 0;
+  border: none;
+  border-top: 1px solid var(--color-line-strong);
+}
+.moji-agent-md .katex {
+  font-size: 1.04em;
+  color: color-mix(in srgb, var(--color-seal-deep) 65%, var(--color-ink) 35%);
+  background: transparent !important;
+  padding: 0 0.08em;
+  border-radius: 0 !important;
+  border: none !important;
+}
+.moji-agent-md .katex-display {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25em 0;
+  background: transparent !important;
+  color: color-mix(in srgb, var(--color-seal-deep) 65%, var(--color-ink) 35%);
+  border-radius: 0 !important;
+  border: none !important;
+}
+.moji-agent-md .katex-display > .katex {
+  background: transparent !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+}
+.moji-agent-md .katex * {
+  border-radius: 0 !important;
+}
+
+/* ---------- 回溯式学习：知识图 ---------- */
+
+.moji-graph,
+.moji-graph-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* 子树用左侧竖线 + 每项一个横钩，表达「依赖 → 前置」的层级 */
+.moji-graph-children {
+  position: relative;
+  margin-left: 12px;
+  padding-left: 16px;
+  border-left: 1px solid var(--color-line);
+}
+
+.moji-graph-item {
+  position: relative;
+}
+
+.moji-graph-children > .moji-graph-item::before {
+  content: '';
+  position: absolute;
+  left: -16px;
+  top: 16px;
+  width: 14px;
+  height: 1px;
+  background: var(--color-line);
+}
+
+/*
+ * 大纲页（OutlineView）的导语 / 节点描述 / 条目摘要走对话正文同一套 markdown 排版
+ * （.moji-agent-md），但这一页自己的设计是浅一档的墨色、导语与描述略大一号——
+ * 双类名保证压过 .moji-agent-md 的默认字号与墨色，不依赖样式表的先后顺序。
+ */
+.moji-agent-md.moji-outline-intro {
+  font-size: 13.5px;
+  color: var(--color-ink-soft);
+}
+
+.moji-agent-md.moji-outline-desc {
+  font-size: 13px;
+  color: var(--color-ink-soft);
+}
+
+.moji-agent-md.moji-outline-summary {
+  color: var(--color-ink-soft);
+}
+
+/*
+ * 原文引用块（```quote）内部的 mark 标记：
+ * 严格直角（rounded-none），荧光高亮色，文字清晰对比
+ */
+.moji-quote-mark {
+  background-color: rgba(250, 204, 21, 0.35);
+  color: var(--color-ink-strong);
+  box-shadow: 0 0 10px rgba(250, 204, 21, 0.22);
+  border-radius: 0;
+  padding: 0.08em 0.25em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+:root.dark .moji-quote-mark,
+:root[data-theme='dark'] .moji-quote-mark,
+:root[data-theme='graphite'] .moji-quote-mark,
+:root[data-theme='navy'] .moji-quote-mark,
+:root[data-theme='black'] .moji-quote-mark,
+:root[data-theme='contrast'] .moji-quote-mark {
+  background-color: rgba(250, 204, 21, 0.32);
+  color: #ffffff;
+  box-shadow: 0 0 10px rgba(250, 204, 21, 0.25);
+}
+
+:root:not(.dark) .moji-quote-mark {
+  background-color: rgba(250, 204, 21, 0.45);
+  color: #1a1a1a;
+  box-shadow: 0 0 8px rgba(250, 204, 21, 0.18);
+}
+
+/* 原文引用组件（```quote item 卡片）：左侧边框加粗并使用突出高亮颜色（印章红高亮），严格直角 */
+.moji-quote-item {
+  border-left-width: 3.5px !important;
+  border-left-color: var(--color-seal) !important;
+  border-left-style: solid !important;
+}
+
+/* 引用块内部及选中文本时的荧光高亮 */
+.moji-quote-code ::selection,
+.moji-quote-block ::selection {
+  background-color: rgba(250, 204, 21, 0.45) !important;
+  color: var(--color-ink-strong) !important;
+}
+
+/* 预览中被引用的行临时闪烁高亮 */
+.moji-reveal-flash {
+  animation: moji-reveal-pulse 1.8s ease-out;
+}
+
+@keyframes moji-reveal-pulse {
+  0% {
+    background-color: rgba(250, 204, 21, 0.5);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+

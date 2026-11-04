@@ -1,0 +1,383 @@
+{
+  "sample": "D:\\BaiduNetdiskDownload\\实验心理学  第9版_坎特威茨.pdf",
+  "runs": [
+    {
+      "label": "first-session",
+      "firstPageMs": 1542,
+      "firstPageTiming": {
+        "canvas": {
+          "pdfCanvas": "1",
+          "pdfReady": "true",
+          "pdfStartedAt": "788",
+          "pdfLoadMs": "10",
+          "pdfRenderMs": "591"
+        },
+        "stages": [
+          {
+            "name": "fixture:module",
+            "ms": 265
+          },
+          {
+            "name": "fixture:plugins",
+            "ms": 268
+          },
+          {
+            "name": "fixture:render",
+            "ms": 271
+          },
+          {
+            "name": "worker:create",
+            "ms": 536
+          },
+          {
+            "name": "worker:ready",
+            "ms": 604
+          }
+        ],
+        "navigation": {
+          "name": "file:///D:/%E6%9C%BA%E6%A2%B0%E9%9D%A9%E5%91%BD%E4%BD%BF%E7%94%A8/codex%E6%96%B0%E5%BB%BA%E4%BD%BF%E7%94%A8/%E5%BD%92%E4%B8%80/node_modules/.tmp/pdf-acceptance/renderer/tests/fixtures/pdf-reader.html?sample=D%3A%5CBaiduNetdiskDownload%5C%E5%AE%9E%E9%AA%8C%E5%BF%83%E7%90%86%E5%AD%A6%20%20%E7%AC%AC9%E7%89%88_%E5%9D%8E%E7%89%B9%E5%A8%81%E8%8C%A8.pdf",
+          "entryType": "navigation",
+          "startTime": 0,
+          "duration": 265.7000000476837,
+          "navigationId": 7616,
+          "initiatorType": "navigation",
+          "deliveryType": "",
+          "nextHopProtocol": "",
+          "renderBlockingStatus": "non-blocking",
+          "contentType": "text/html",
+          "contentEncoding": "",
+          "workerStart": 0,
+          "workerRouterEvaluationStart": 0,
+          "workerCacheLookupStart": 0,
+          "workerMatchedSourceType": "",
+          "workerFinalSourceType": "",
+          "redirectStart": 0,
+          "redirectEnd": 0,
+          "fetchStart": 16,
+          "domainLookupStart": 16,
+          "domainLookupEnd": 16,
+          "connectStart": 16,
+          "secureConnectionStart": 0,
+          "connectEnd": 16,
+          "requestStart": 16,
+          "responseStart": 16,
+          "firstInterimResponseStart": 0,
+          "finalResponseHeadersStart": 0,
+          "responseEnd": 27.600000023841858,
+          "transferSize": 657,
+          "encodedBodySize": 357,
+          "decodedBodySize": 357,
+          "responseStatus": 200,
+          "serverTiming": [],
+          "unloadEventStart": 0,
+          "unloadEventEnd": 0,
+          "domInteractive": 71.39999997615814,
+          "domContentLoadedEventStart": 265.2000000476837,
+          "domContentLoadedEventEnd": 265.2000000476837,
+          "domComplete": 265.5,
+          "loadEventStart": 265.5,
+          "loadEventEnd": 265.7000000476837,
+          "type": "navigate",
+          "redirectCount": 0,
+          "activationStart": 0,
+          "criticalCHRestart": 0,
+          "notRestoredReasons": null,
+          "confidence": {}
+        }
+      },
+      "firstPageNetwork": {
+        "ranges": [
+          "bytes=0-1048575",
+          "bytes=208797696-208800121",
+          "bytes=208732160-208797695",
+          "bytes=1048576-1114111",
+          "bytes=1114112-1179647"
+        ],
+        "urls": [
+          "unyra-pdf://7d0c4667fd78405d933f1d3a591dca7d/document.pdf",
+          "unyra-pdf://7d0c4667fd78405d933f1d3a591dca7d/document.pdf",
+          "unyra-pdf://7d0c4667fd78405d933f1d3a591dca7d/document.pdf",
+          "unyra-pdf://7d0c4667fd78405d933f1d3a591dca7d/document.pdf",
+          "unyra-pdf://7d0c4667fd78405d933f1d3a591dca7d/document.pdf"
+        ],
+        "requestedBytes": 1247610,
+        "fullRequests": 0,
+        "timings": [
+          {
+            "range": "bytes=0-1048575",
+            "start": 507,
+            "headers": 521,
+            "end": 535
+          },
+          {
+            "range": "bytes=208797696-208800121",
+            "start": 615,
+            "headers": 618,
+            "end": 619
+          },
+          {
+            "range": "bytes=208732160-208797695",
+            "start": 620,
+            "headers": 623,
+            "end": 624
+          },
+          {
+            "range": "bytes=1048576-1114111",
+            "start": 961,
+            "headers": 966,
+            "end": 968
+          },
+          {
+            "range": "bytes=1114112-1179647",
+            "start": 1444,
+            "headers": 1448,
+            "end": 1449
+          }
+        ]
+      },
+      "preloadedMs": 21,
+      "jump500Ms": 2037,
+      "jump686Ms": 994,
+      "jump500Timing": {
+        "pdfCanvas": "500",
+        "pdfReady": "true",
+        "pdfStartedAt": "9736",
+        "pdfLoadMs": "961",
+        "pdfRenderMs": "1014"
+      },
+      "jump686Timing": {
+        "pdfCanvas": "686",
+        "pdfReady": "true",
+        "pdfStartedAt": "11768",
+        "pdfLoadMs": "376",
+        "pdfRenderMs": "575"
+      },
+      "mode": "range",
+      "darkPixelSamples": 6763,
+      "canvasCount": 4,
+      "maxCanvases": 6,
+      "oldReleased": true,
+      "pagePosition": 8.912498474121094,
+      "memory": {
+        "workingSetSize": 411652,
+        "peakWorkingSetSize": 421380,
+        "privateBytes": 385260
+      },
+      "stressMemory": [
+        {
+          "workingSetSize": 544000,
+          "peakWorkingSetSize": 544000,
+          "privateBytes": 438416
+        },
+        {
+          "workingSetSize": 515672,
+          "peakWorkingSetSize": 579496,
+          "privateBytes": 359728
+        }
+      ],
+      "indexed": [
+        {
+          "documentId": "45fd6f3f9a05e1b59cf38d43340680c2a6da5a7f731cabc71d670690564be67d",
+          "path": "D:\\BaiduNetdiskDownload\\实验心理学  第9版_坎特威茨.pdf",
+          "total": 686,
+          "indexed": 2
+        }
+      ],
+      "status": "页面渲染：已显示 · 当前页已识别后台识别 2/686 · 正在解析第 500 页暂停识别",
+      "base64Reads": 0,
+      "ocrCalls": 3,
+      "ownOcrPages": [
+        1,
+        686
+      ],
+      "ownCachePages": [],
+      "outlineNavigation": true,
+      "revokedStatus": 403
+    },
+    {
+      "label": "reopen-cache",
+      "firstPageMs": 1497,
+      "firstPageTiming": {
+        "canvas": {
+          "pdfCanvas": "1",
+          "pdfReady": "true",
+          "pdfStartedAt": "593",
+          "pdfLoadMs": "7",
+          "pdfRenderMs": "783"
+        },
+        "stages": [
+          {
+            "name": "fixture:module",
+            "ms": 259
+          },
+          {
+            "name": "fixture:plugins",
+            "ms": 263
+          },
+          {
+            "name": "fixture:render",
+            "ms": 264
+          },
+          {
+            "name": "worker:create",
+            "ms": 373
+          },
+          {
+            "name": "worker:ready",
+            "ms": 428
+          }
+        ],
+        "navigation": {
+          "name": "file:///D:/%E6%9C%BA%E6%A2%B0%E9%9D%A9%E5%91%BD%E4%BD%BF%E7%94%A8/codex%E6%96%B0%E5%BB%BA%E4%BD%BF%E7%94%A8/%E5%BD%92%E4%B8%80/node_modules/.tmp/pdf-acceptance/renderer/tests/fixtures/pdf-reader.html?sample=D%3A%5CBaiduNetdiskDownload%5C%E5%AE%9E%E9%AA%8C%E5%BF%83%E7%90%86%E5%AD%A6%20%20%E7%AC%AC9%E7%89%88_%E5%9D%8E%E7%89%B9%E5%A8%81%E8%8C%A8.pdf",
+          "entryType": "navigation",
+          "startTime": 0,
+          "duration": 260.10000002384186,
+          "navigationId": 3862,
+          "initiatorType": "navigation",
+          "deliveryType": "",
+          "nextHopProtocol": "",
+          "renderBlockingStatus": "non-blocking",
+          "contentType": "text/html",
+          "contentEncoding": "",
+          "workerStart": 0,
+          "workerRouterEvaluationStart": 0,
+          "workerCacheLookupStart": 0,
+          "workerMatchedSourceType": "",
+          "workerFinalSourceType": "",
+          "redirectStart": 0,
+          "redirectEnd": 0,
+          "fetchStart": 10.900000095367432,
+          "domainLookupStart": 10.900000095367432,
+          "domainLookupEnd": 10.900000095367432,
+          "connectStart": 10.900000095367432,
+          "secureConnectionStart": 0,
+          "connectEnd": 10.900000095367432,
+          "requestStart": 10.900000095367432,
+          "responseStart": 10.900000095367432,
+          "firstInterimResponseStart": 0,
+          "finalResponseHeadersStart": 0,
+          "responseEnd": 107,
+          "transferSize": 657,
+          "encodedBodySize": 357,
+          "decodedBodySize": 357,
+          "responseStatus": 200,
+          "serverTiming": [],
+          "unloadEventStart": 0,
+          "unloadEventEnd": 0,
+          "domInteractive": 208.20000004768372,
+          "domContentLoadedEventStart": 259.7000000476837,
+          "domContentLoadedEventEnd": 259.7000000476837,
+          "domComplete": 259.90000009536743,
+          "loadEventStart": 259.90000009536743,
+          "loadEventEnd": 260.10000002384186,
+          "type": "navigate",
+          "redirectCount": 0,
+          "activationStart": 0,
+          "criticalCHRestart": 0,
+          "notRestoredReasons": null,
+          "confidence": {}
+        }
+      },
+      "firstPageNetwork": {
+        "ranges": [
+          "bytes=0-1048575",
+          "bytes=208797696-208800121",
+          "bytes=208732160-208797695",
+          "bytes=1048576-1114111",
+          "bytes=1114112-1179647"
+        ],
+        "urls": [
+          "unyra-pdf://9e86258c132f431eaa66127ec7bf22f6/document.pdf",
+          "unyra-pdf://9e86258c132f431eaa66127ec7bf22f6/document.pdf",
+          "unyra-pdf://9e86258c132f431eaa66127ec7bf22f6/document.pdf",
+          "unyra-pdf://9e86258c132f431eaa66127ec7bf22f6/document.pdf",
+          "unyra-pdf://9e86258c132f431eaa66127ec7bf22f6/document.pdf"
+        ],
+        "requestedBytes": 1247610,
+        "fullRequests": 0,
+        "timings": [
+          {
+            "range": "bytes=0-1048575",
+            "start": 361,
+            "headers": 363,
+            "end": 371
+          },
+          {
+            "range": "bytes=208797696-208800121",
+            "start": 438,
+            "headers": 441,
+            "end": 441
+          },
+          {
+            "range": "bytes=208732160-208797695",
+            "start": 442,
+            "headers": 444,
+            "end": 444
+          },
+          {
+            "range": "bytes=1048576-1114111",
+            "start": 685,
+            "headers": 688,
+            "end": 688
+          },
+          {
+            "range": "bytes=1114112-1179647",
+            "start": 1427,
+            "headers": 1429,
+            "end": 1430
+          }
+        ]
+      },
+      "preloadedMs": 19,
+      "jump500Ms": 1060,
+      "jump686Ms": 976,
+      "jump500Timing": {
+        "pdfCanvas": "500",
+        "pdfReady": "true",
+        "pdfStartedAt": "3764",
+        "pdfLoadMs": "805",
+        "pdfRenderMs": "169"
+      },
+      "jump686Timing": {
+        "pdfCanvas": "686",
+        "pdfReady": "true",
+        "pdfStartedAt": "4826",
+        "pdfLoadMs": "222",
+        "pdfRenderMs": "705"
+      },
+      "mode": "range",
+      "darkPixelSamples": 6763,
+      "canvasCount": 4,
+      "maxCanvases": 4,
+      "oldReleased": true,
+      "pagePosition": 8.912498474121094,
+      "memory": {
+        "workingSetSize": 352308,
+        "peakWorkingSetSize": 397452,
+        "privateBytes": 340380
+      },
+      "stressMemory": [],
+      "indexed": [
+        {
+          "documentId": "45fd6f3f9a05e1b59cf38d43340680c2a6da5a7f731cabc71d670690564be67d",
+          "path": "D:\\BaiduNetdiskDownload\\实验心理学  第9版_坎特威茨.pdf",
+          "total": 686,
+          "indexed": 2
+        }
+      ],
+      "status": "页面渲染：已显示 · 当前页待解析后台识别 2/686 · 正在识别第 2 页暂停识别",
+      "base64Reads": 0,
+      "ocrCalls": 4,
+      "ownOcrPages": [
+        2
+      ],
+      "ownCachePages": [
+        1
+      ],
+      "outlineNavigation": true,
+      "revokedStatus": 403
+    }
+  ],
+  "firstSessionOcrCalls": 3,
+  "sourceSize": 208800122
+}

@@ -1,0 +1,428 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>归一 · 公告编辑器</title>
+    <style>
+      /* 只在本机跑的一个小工具，样式自己带一份，不引任何外部资源（断网也能用） */
+      :root {
+        --paper: #f7f4ee;
+        --card: #ffffff;
+        --sunken: #efeae1;
+        --ink: #2b2620;
+        --ink-soft: #6b6357;
+        --ink-faint: #9a9186;
+        --line: #e2dbd0;
+        --line-strong: #cfc6b8;
+        --seal: #a8432f;
+        --seal-deep: #8c3524;
+        --ok: #3f7d4e;
+        --warn: #a8621f;
+        --err: #b3352c;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #17150f;
+          --card: #1e1c17;
+          --sunken: #24221b;
+          --ink: #ece6db;
+          --ink-soft: #a8a094;
+          --ink-faint: #7b746a;
+          --line: #322f28;
+          --line-strong: #45413a;
+          --seal: #d0705a;
+          --seal-deep: #e08a74;
+          --ok: #7fbb8c;
+          --warn: #d9a25f;
+          --err: #e08479;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 13px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      button, input, textarea { font: inherit; color: inherit; }
+      header {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 16px; border-bottom: 1px solid var(--line);
+        background: var(--card); position: sticky; top: 0; z-index: 5;
+      }
+      header .logo { width: 22px; height: 22px; border-radius: 6px; background: var(--seal); display: grid; place-items: center; color: #fff; font-size: 12px; }
+      header h1 { font-size: 14px; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+      header .meta { color: var(--ink-faint); font-size: 11.5px; display: flex; gap: 14px; flex-wrap: wrap; margin-left: auto; }
+      header .meta a { color: var(--seal); text-decoration: none; }
+      main { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 16px; padding: 16px; max-width: 1500px; margin: 0 auto; align-items: start; }
+      .panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+      .panel > h2 { font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-faint); margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+      .pad { padding: 12px; }
+
+      /* 公告列表 */
+      .item { display: block; width: 100%; text-align: left; border: 1px solid var(--line); background: var(--sunken); border-radius: 9px; padding: 8px 10px; margin-bottom: 7px; cursor: pointer; transition: border-color .12s, background .12s; }
+      .item:hover { border-color: var(--line-strong); }
+      .item.on { border-color: var(--seal); background: color-mix(in srgb, var(--seal) 10%, var(--card)); }
+      .item .t { font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .item .s { font-size: 11px; color: var(--ink-faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .item .off { color: var(--warn); }
+      .rowbtns { display: flex; gap: 4px; margin-top: 6px; }
+      .rowbtns button { flex: 1; padding: 2px 0; font-size: 11px; border: 1px solid var(--line); background: var(--card); border-radius: 6px; cursor: pointer; color: var(--ink-soft); }
+      .rowbtns button:hover { border-color: var(--line-strong); color: var(--ink); }
+
+      /* 表单 */
+      label.field { display: block; margin-bottom: 10px; }
+      label.field > span { display: block; font-size: 11.5px; color: var(--ink-soft); margin-bottom: 4px; }
+      label.field > span em { font-style: normal; color: var(--ink-faint); }
+      input[type=text], input[type=date], textarea {
+        width: 100%; padding: 7px 9px; border: 1px solid var(--line-strong); border-radius: 8px;
+        background: var(--paper); outline: none;
+      }
+      input:focus, textarea:focus { border-color: var(--seal); }
+      textarea { min-height: 300px; resize: vertical; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.65; }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+      /* 按钮 */
+      .btn { border: 1px solid var(--line-strong); background: var(--card); border-radius: 8px; padding: 6px 13px; cursor: pointer; color: var(--ink); }
+      .btn:hover { border-color: var(--seal); }
+      .btn.primary { background: var(--seal); border-color: var(--seal); color: #fff; font-weight: 500; }
+      .btn.primary:hover { background: var(--seal-deep); border-color: var(--seal-deep); }
+      .btn:disabled { opacity: .5; cursor: not-allowed; }
+      .bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      .bar .spacer { margin-left: auto; }
+      .switch { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--ink-soft); cursor: pointer; }
+      .switch input { width: 15px; height: 15px; accent-color: var(--seal); }
+
+      /* 校验与日志 */
+      .msg { border-radius: 9px; padding: 9px 11px; font-size: 12px; margin-bottom: 10px; }
+      .msg.err { background: color-mix(in srgb, var(--err) 12%, transparent); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); }
+      .msg.ok { background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
+      .msg ul { margin: 4px 0 0; padding-left: 18px; }
+      pre.log { background: var(--sunken); border: 1px solid var(--line); border-radius: 9px; padding: 10px; font-size: 11.5px; line-height: 1.6; max-height: 260px; overflow: auto; white-space: pre-wrap; margin: 0; font-family: ui-monospace, Consolas, monospace; }
+      .thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+      .thumbs img { max-width: 110px; max-height: 70px; border-radius: 6px; border: 1px solid var(--line); object-fit: cover; }
+      .hint { font-size: 11px; color: var(--ink-faint); margin-top: 6px; }
+      code { background: var(--sunken); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="logo">告</div>
+      <h1>归一 · 公告编辑器</h1>
+      <div class="meta">
+        <span id="m-repo"></span>
+        <span><a id="m-url" target="_blank" rel="noreferrer"></a></span>
+        <span id="m-status"></span>
+      </div>
+    </header>
+
+    <main>
+      <!-- 左：公告列表 -->
+      <section class="panel">
+        <h2>公告（页签顺序即此处顺序）</h2>
+        <div class="pad">
+          <div id="list"></div>
+          <button class="btn" id="add" style="width: 100%">+ 新增一条</button>
+          <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line)">
+            <label class="switch"><input type="checkbox" id="global-enabled" /> 整份公告启用</label>
+            <div class="hint">关掉它 = 所有公告一起下线（客户端会当作「没有公告」）。</div>
+          </div>
+          <div style="margin-top: 12px; display: flex; gap: 8px">
+            <button class="btn" id="save" style="flex: 1">保存草稿</button>
+            <button class="btn" id="reset">清空</button>
+          </div>
+          <div class="hint" id="draft-path"></div>
+        </div>
+      </section>
+
+      <!-- 右：编辑 + 发布 -->
+      <section class="panel">
+        <h2>编辑</h2>
+        <div class="pad" id="editor"></div>
+        <div class="pad" style="border-top: 1px solid var(--line)">
+          <div class="bar">
+            <button class="btn primary" id="publish">发布公告</button>
+            <span class="spacer"></span>
+            <span class="hint" id="dirty"></span>
+          </div>
+          <div id="result" style="margin-top: 12px"></div>
+          <pre class="log" id="log" style="margin-top: 10px; display: none"></pre>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id)
+      let draft = { enabled: true, notices: [] }
+      let selected = 0
+      let dirty = false
+      let state = null
+
+      /* ---------- 取回状态 ---------- */
+
+      async function api(path, body) {
+        const res = await fetch(path, {
+          method: body === undefined ? 'GET' : 'POST',
+          headers: body === undefined ? {} : { 'content-type': 'application/json' },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })
+        return res.json()
+      }
+
+      async function boot() {
+        state = await api('/api/state')
+        draft = state.draft
+        if (!Array.isArray(draft.notices) || !draft.notices.length) {
+          draft = { enabled: true, notices: [{ id: '', title: '', content: '', publishedAt: today(), minVersion: '', enabled: true }] }
+        }
+        $('m-repo').textContent = state.repo + ' @ ' + state.branch
+        $('m-url').textContent = state.noticeUrl
+        $('m-url').href = state.noticeUrl
+        $('draft-path').textContent = '草稿文件：' + state.draftFile
+        render()
+        if (state.job && state.job.status === 'running') watchJob()
+      }
+
+      const today = () => new Date().toISOString().slice(0, 10)
+
+      /* ---------- 渲染 ---------- */
+
+      function render() {
+        renderList()
+        renderEditor()
+        $('global-enabled').checked = draft.enabled !== false
+        $('dirty').textContent = dirty ? '有未保存的改动' : ''
+        $('m-status').innerHTML = state && state.live && state.live.ok
+          ? '<span style="color:var(--ok)">线上可访问</span>'
+          : '<span style="color:var(--warn)">线上取不到</span>'
+      }
+
+      function renderList() {
+        const box = $('list')
+        box.innerHTML = ''
+        draft.notices.forEach((n, i) => {
+          const el = document.createElement('div')
+          el.className = 'item' + (i === selected ? ' on' : '')
+          const off = n.enabled === false
+          el.innerHTML =
+            '<div class="t">' + esc(n.title || '(无标题)') + '</div>' +
+            '<div class="s">' + esc(n.id || '(无 id)') + (n.publishedAt ? ' · ' + esc(n.publishedAt) : '') +
+            (off ? ' · <span class="off">已停用</span>' : '') + '</div>'
+          const btns = document.createElement('div')
+          btns.className = 'rowbtns'
+          btns.append(
+            mkBtn('↑', () => move(i, -1)),
+            mkBtn('↓', () => move(i, 1)),
+            mkBtn('复制', () => dup(i)),
+            mkBtn('删除', () => del(i)),
+          )
+          el.append(btns)
+          el.onclick = (e) => { if (e.target.tagName !== 'BUTTON') { selected = i; render() } }
+          box.append(el)
+        })
+      }
+
+      const mkBtn = (label, fn) => {
+        const b = document.createElement('button')
+        b.textContent = label
+        b.onclick = (e) => { e.stopPropagation(); fn() }
+        return b
+      }
+
+      function renderEditor() {
+        const n = draft.notices[selected]
+        const box = $('editor')
+        if (!n) { box.innerHTML = '<p class="hint">左边还没有公告，点「新增一条」。</p>'; return }
+        box.innerHTML = `
+          <label class="field"><span>标题 <em>（页签上显示的就是它）</em></span>
+            <input type="text" id="f-title" value="${esc(n.title || '')}" /></label>
+          <div class="grid2">
+            <label class="field"><span>id <em>（改了内容要换新 id）</em></span>
+              <input type="text" id="f-id" value="${esc(n.id || '')}" /></label>
+            <label class="field"><span>发布日期</span>
+              <input type="date" id="f-date" value="${esc(n.publishedAt || '')}" /></label>
+          </div>
+          <label class="field"><span>最低适用版本 <em>（可空；低于它的客户端不显示这条）</em></span>
+            <input type="text" id="f-min" placeholder="例如 0.6.2" value="${esc(n.minVersion || '')}" /></label>
+          <label class="field"><span>正文（Markdown，图片用完整 https 地址）</span>
+            <textarea id="f-content">${esc(n.content || '')}</textarea></label>
+          <div class="bar">
+            <button class="btn" id="f-img">插入图片…</button>
+            <input type="file" id="f-file" accept="image/*" style="display:none" />
+            <label class="switch" style="margin-left:auto"><input type="checkbox" id="f-on" ${n.enabled === false ? '' : 'checked'} /> 这条启用</label>
+          </div>
+          <div class="thumbs" id="f-thumbs"></div>
+          <div class="hint">图片会上传到公告仓库的 <code>${esc(state ? state.imageBase : '')}</code>，由 GitHub Pages 提供。图片会进 Git 历史（正文不会）。</div>
+        `
+        const bind = (id, key, transform) => {
+          const el = $(id)
+          if (!el) return
+          el.oninput = () => { n[key] = transform ? transform(el.value) : el.value; touch() }
+        }
+        bind('f-title', 'title')
+        bind('f-id', 'id')
+        bind('f-date', 'publishedAt')
+        bind('f-min', 'minVersion')
+        bind('f-content', 'content')
+        $('f-on').onchange = (e) => { n.enabled = e.target.checked; touch() }
+        $('f-img').onclick = () => $('f-file').click()
+        $('f-file').onchange = (e) => insertImage(e.target.files[0])
+        renderThumbs()
+      }
+
+      function renderThumbs() {
+        const n = draft.notices[selected]
+        const box = $('f-thumbs')
+        if (!box || !n) return
+        const urls = [...String(n.content || '').matchAll(/!\[[^\]]*\]\((https:\/\/[^)\s]+)/g)].map((m) => m[1])
+        box.innerHTML = urls.map((u) => '<img src="' + esc(u) + '" alt="" loading="lazy" />').join('')
+      }
+
+      function touch() {
+        dirty = true
+        renderList()
+        $('dirty').textContent = '有未保存的改动'
+      }
+
+      /* ---------- 列表操作 ---------- */
+
+      function move(i, d) {
+        const j = i + d
+        if (j < 0 || j >= draft.notices.length) return
+        const [x] = draft.notices.splice(i, 1)
+        draft.notices.splice(j, 0, x)
+        selected = j
+        touch()
+        render()
+      }
+      function dup(i) {
+        const copy = JSON.parse(JSON.stringify(draft.notices[i]))
+        copy.id = copy.id ? copy.id + '-copy' : ''
+        copy.title = (copy.title || '') + '（副本）'
+        draft.notices.splice(i + 1, 0, copy)
+        selected = i + 1
+        touch()
+        render()
+      }
+      function del(i) {
+        if (!confirm('删除这条公告？')) return
+        draft.notices.splice(i, 1)
+        selected = Math.max(0, Math.min(selected, draft.notices.length - 1))
+        touch()
+        render()
+      }
+
+      /* ---------- 图片 ---------- */
+
+      async function insertImage(file) {
+        if (!file) return
+        const dataUrl = await new Promise((resolve) => {
+          const r = new FileReader()
+          r.onload = () => resolve(r.result)
+          r.readAsDataURL(file)
+        })
+        const btn = $('f-img')
+        btn.disabled = true
+        btn.textContent = '上传中…'
+        try {
+          const res = await api('/api/upload-image', { name: file.name, dataUrl })
+          if (!res.ok) { alert('上传失败：' + res.error); return }
+          const ta = $('f-content')
+          const snippet = '\n\n![' + (file.name.replace(/\.[^.]+$/, '') || '图片') + '](' + res.url + ')\n'
+          const at = ta.selectionStart ?? ta.value.length
+          ta.value = ta.value.slice(0, at) + snippet + ta.value.slice(at)
+          draft.notices[selected].content = ta.value
+          ta.selectionStart = ta.selectionEnd = at + snippet.length
+          touch()
+          renderThumbs()
+        } finally {
+          btn.disabled = false
+          btn.textContent = '插入图片…'
+          $('f-file').value = ''
+        }
+      }
+
+      /* ---------- 保存 / 发布 ---------- */
+
+      function showErrors(errors) {
+        const box = $('result')
+        if (!errors || !errors.length) { box.innerHTML = ''; return }
+        box.innerHTML = '<div class="msg err"><b>还不能发布：</b><ul>' + errors.map((e) => '<li>' + esc(e) + '</li>').join('') + '</ul></div>'
+      }
+
+      async function save() {
+        const res = await api('/api/draft', draft)
+        dirty = false
+        render()
+        showErrors(res.errors)
+        if (!res.errors.length) $('result').innerHTML = '<div class="msg ok">草稿已保存到本地。</div>'
+      }
+
+      async function publish() {
+        const res = await api('/api/publish', draft)
+        if (!res.ok) { showErrors(res.errors); return }
+        dirty = false
+        render()
+        $('result').innerHTML = ''
+        $('publish').disabled = true
+        watchJob()
+      }
+
+      let timer = null
+      async function watchJob() {
+        $('log').style.display = 'block'
+        const poll = async () => {
+          const s = await api('/api/state')
+          state = s
+          if (s.job) {
+            $('log').textContent = s.job.lines.join('\n')
+            $('log').scrollTop = $('log').scrollHeight
+            if (s.job.runUrl) {
+              $('m-status').innerHTML = '<a href="' + s.job.runUrl + '" target="_blank" rel="noreferrer">查看运行页</a>'
+            }
+            if (s.job.status === 'running') { timer = setTimeout(poll, 2500); return }
+            $('publish').disabled = false
+            if (s.job.status === 'done') {
+              $('result').innerHTML = '<div class="msg ok">已发布，线上就是这份内容。</div>'
+            } else {
+              $('result').innerHTML = '<div class="msg err">发布失败：' + esc(s.job.errors.join('；')) + '</div>'
+            }
+            return
+          }
+          $('publish').disabled = false
+        }
+        poll()
+      }
+
+      /* ---------- 事件 ---------- */
+
+      $('add').onclick = () => {
+        draft.notices.push({ id: 'notice-' + String(Date.now()).slice(-6), title: '新公告', content: '', publishedAt: today(), minVersion: '', enabled: true })
+        selected = draft.notices.length - 1
+        touch()
+        render()
+      }
+      $('global-enabled').onchange = (e) => { draft.enabled = e.target.checked; touch() }
+      $('save').onclick = save
+      $('publish').onclick = publish
+      $('reset').onclick = async () => {
+        if (!confirm('清空草稿，重新开始？')) return
+        const r = await api('/api/reset', {})
+        draft = r.draft
+        selected = 0
+        dirty = false
+        render()
+      }
+
+      // 有未保存改动时别让用户一键关掉
+      window.addEventListener('beforeunload', (e) => {
+        if (dirty) { e.preventDefault(); e.returnValue = '' }
+      })
+
+      const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+
+      boot()
+    </script>
+  </body>
+</html>

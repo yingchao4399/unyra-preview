@@ -1,0 +1,992 @@
+/**
+ * preload：渲染进程与主进程之间唯一的通道。
+ *
+ * 渲染进程以 contextIsolation + sandbox 运行，拿不到 Node，也碰不到 ipcRenderer。
+ * 这里用 contextBridge 把主进程的能力收敛成一个受控的 `window.mojiNative`，
+ * 只暴露必要的方法——不暴露 ipcRenderer 本身，避免渲染层能向任意频道发消息。
+ *
+ * 通道一览：
+ * - `llm-proxy:setHosts` / `llm-proxy:getHosts` —— 同步代理白名单
+ * - `file:saveText` / `file:openText` / `file:exportPdf` —— 原生导入导出对话框（退出为 PDF）
+ * - `storage:*` —— 全局设置（存储位置）、会话与本机文件读写
+ * - `update:*` —— 自动更新状态、手动检查、安装已下载的新版本、更新策略（正式版 / 尝鲜版）
+ * - `window:*` —— 窗口最小化/最大化/关闭、收进托盘、关窗询问的回答
+ * - `exam:*` —— 考试窗口（第二个 BrowserWindow）的开窗、状态推送与事件转发
+ * - `web:fetch` —— 抓一个网页的字节（主进程去取，渲染层受同源策略约束）
+ * - `shell:*` —— 关窗行为（全局设置）的读写
+ * - `plugins:*` —— 插件目录的列出、读源码与开关（执行在渲染层，见 src/lib/plugins.ts）
+ */
+
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+
+import type {
+  AttachReadResult, BaseFileEditOpts, BaseFileEditResult, BaseFileEntry, BaseFileListResult, BaseFileOpResult, BaseFileReadResult,
+  BaseFileStatResult, BaseFileWriteResult, BaseProcessCreateOpts, BaseProcessCreateResult, BaseProcessDeleteResult, BaseProcessGetResult,
+  BaseProcessInfo, BaseProcessListResult, BaseProcessOutputResult, BaseProcessStartResult, BaseProcessStatusResult,
+  BaseProcessStopResult, CloseAction, CloseBehavior, CodeArtifact, ExamCloseReason,
+  CropBoxInput, CropImageResult, PreviewCropResult, RotateImageResult,
+  ExamOpenResult, ExportPdfPayload, ExportPdfResult, FlushItem, McpStdioCallResult, McpStdioServerPayload, McpStdioToolsResult,
+  PluginEntry, PluginListResult, PluginSettingsResult,
+  PluginSourceResult, PluginTogglesResult, SaveFilter, SilentMark, StorageEntry, StorageFail,
+  NoticeSettings,
+  StorageInfo, StorageOk, StorageRootResult, UpdateChannel, UpdateFail, UpdatePhase, UpdateState,
+  VideoApiFetchResult, VideoStreamOpenResult, VoiceDownloadResult, VoiceModelProgress, VoiceModelStatus, VoiceTranscribeRequest,
+  VoiceTranscribeResult, OcrModelStatus, OcrModelProgress, OcrDownloadRequest, OcrDownloadResult, OcrRecognizeRequest, OcrRecognizeResult, OcrPageResult, WebDomOpResult, WebFastTranslateResult,
+  WebFetchResult, WebBinaryFetchResult, WebLogDetailResult, WebLogsOpts, WebLogsResult, WebPageFetchReq,
+  WebPageFetchResult, WebPointResult, WebReadHtmlResult, WebRecordResult, WebScrollReq,
+  WebScrollResult, WebSnapshotResult, WebTextResult, WebTextTarget, WebTranslatePayload, WebWaitReq, WebWaitResult,
+  LanDeviceInfo, LanRequestFileOptions, LanRequestFileResult, LanServerStatus, LanUploadedFile,
+  ScreenCaptureResult, ScreenRecordResult, ImageSavePayload, ImageSaveResult, ImageCopyResult,
+  ProjectFsRequest, ProjectFsResult,
+} from '../shared/ipc'
+
+// 这些契约形状统一在 shared/ipc.ts（渲染层与主进程共用一份，见该文件顶部）：
+// 两边原先各写一遍、逐字重复，漏改一侧不会编译报错，只会在运行时炸。
+// 这里按原样转出去，外部从 electron/preload 引这些类型的写法不用改。
+export type {
+  AttachReadResult, BaseFileEditResult, BaseFileEntry, BaseFileListResult, BaseFileOpResult, BaseFileReadResult,
+  BaseFileStatResult, BaseFileWriteResult, BaseProcessCreateOpts, BaseProcessCreateResult, BaseProcessDeleteResult, BaseProcessGetResult,
+  BaseProcessInfo, BaseProcessListResult, BaseProcessOutputResult, BaseProcessStartResult, BaseProcessStatusResult,
+  BaseProcessStopResult, CloseAction, CloseBehavior, CodeArtifact, ExamCloseReason,
+  ExamOpenResult, ExportPdfPayload, ExportPdfResult, FlushItem, McpStdioCallResult, McpStdioServerPayload, McpStdioToolsResult,
+  PluginEntry, PluginListResult,
+  PluginSourceResult, PluginTogglesResult, SaveFilter, SilentMark, StorageEntry, StorageFail,
+  NoticeSettings,
+  StorageInfo, StorageOk, StorageRootResult, UpdateChannel, UpdateFail, UpdatePhase, UpdateState,
+  VoiceDownloadResult, VoiceModelProgress, VoiceModelStatus, VoiceTranscribeRequest,
+  VoiceTranscribeResult, WebDomOpResult,
+  WebFetchResult, WebBinaryFetchResult, WebPointResult, WebReadHtmlResult, WebSnapshotResult,
+  LanDeviceInfo, LanRequestFileOptions, LanRequestFileResult, LanServerStatus, LanUploadedFile,
+  CropBoxInput, CropImageResult, PreviewCropResult, RotateImageResult,
+  ScreenCaptureResult, ScreenRecordResult, ImageSavePayload, ImageSaveResult, ImageCopyResult,
+  ProjectFsRequest, ProjectFsResult,
+}
+
+/* ---------- 只在 preload 这一侧用到的形状 ---------- */
+
+export interface SaveTextResult {
+  ok: boolean
+  canceled?: boolean
+  path?: string
+  error?: string
+}
+
+export type ArtifactListResult =
+  | { ok: true; items: Record<string, CodeArtifact>; silent: Record<string, SilentMark> }
+  | { ok: false; error: string }
+
+/** 主进程替沙箱发出去的一次请求（真的结果，见 electron/runner.ts 的 runFetch） */
+export type RunnerFetchResult =
+  | { ok: true; status: number; statusText: string; headers: Array<[string, string]>; body: string; truncated: boolean }
+  | { ok: false; error: string }
+
+/** 外部文件（拖进来浏览的本地文件）的读写结果 */
+export type LocalReadResult = { ok: true; content: string } | { ok: false; error: string }
+
+/** 文档区截图（window.capture）的返回：dataUrl 是 PNG */
+export type CaptureResult = { ok: true; dataUrl: string } | { ok: false; error: string }
+export type LocalWriteResult = { ok: boolean; error?: string }
+/** 本地媒体文件的读取结果（多媒体预览页签用） */
+export type LocalMediaResult = { ok: true; mime: string; dataUrl: string } | { ok: false; error: string }
+export type PdfSourceResult =
+  | { ok: true; url: string; size: number; modifiedAt: number; fingerprint: string }
+  | { ok: false; error: string }
+
+export type StorageReadResult = { ok: true; content: string | null } | StorageFail
+export type StorageListResult = { ok: true; entries: StorageEntry[] } | StorageFail
+export type StorageYamlResult = { ok: true; data: unknown } | StorageFail
+/** 读二进制（图片通道与资源库通道共用）：dataUrl 为 null 表示文件不存在（不算错误） */
+export type StorageImageResult = { ok: true; dataUrl: string | null } | StorageFail
+
+const api = {
+  /** 是否运行在 Electron 壳里。渲染层的 http 层据此选择直连还是走主进程 */
+  isElectron: true as const,
+  /** 当前宿主操作系统平台（'win32' | 'darwin' | 'linux'） */
+  platform: process.platform as 'win32' | 'darwin' | 'linux',
+
+  /**
+   * 界面语言（zh / en）。语言状态的拥有者是渲染层：挂载时与每次切换都推一份过来，
+   * 主进程收到后换掉自己的 t() 并重建应用菜单（`ui-locale` 频道，处理器在 app/ipc.ts）。
+   */
+  setUiLocale: (l: string) => { ipcRenderer.send('ui-locale', l) },
+
+  /** 启动时读一次存档（global.yaml）：语言跟机器走，见 src/lib/uiLocale 的 loadUiLocale */
+  getUiLocale: (): Promise<string> => ipcRenderer.invoke('ui-locale:get'),
+
+  /**
+   * 把「允许代理的 host 列表」同步给主进程。
+   * 主进程据此收紧 llm-proxy 白名单——不做开放代理。
+   */
+  // 每一项是 `协议//host`：改写后的 llm-proxy:// 地址里没有协议，主进程只能从这份名单里取
+  setProxyHosts: (hosts: string[]): Promise<string[]> => ipcRenderer.invoke('llm-proxy:setHosts', hosts),
+
+  getProxyHosts: (): Promise<string[]> => ipcRenderer.invoke('llm-proxy:getHosts'),
+
+  /**
+   * 原生「保存文件」对话框；用户取消时返回 canceled。
+   * title / filters 用来换对话框的标题与扩展名过滤（导出文档是 md / html）。
+   */
+  saveText: (payload: {
+    suggestedName?: string
+    content: string
+    title?: string
+    filters?: SaveFilter[]
+  }): Promise<SaveTextResult> => ipcRenderer.invoke('file:saveText', payload),
+
+  /**
+   * 导出 PDF：给一份自带样式的 HTML，主进程在隐藏窗口里排版、打印，最后落到用户选的路径。
+   * 返回 bytes 只是为了让界面能说一句「导出了多大」，不参与任何判断。
+   */
+  exportPdf: (payload: ExportPdfPayload): Promise<ExportPdfResult> =>
+    ipcRenderer.invoke('file:exportPdf', payload),
+
+  /**
+   * 拖进来的文件 → 它的绝对路径。
+   *
+   * Electron 32 起 File.path 被删掉了，只剩这条官方替代路：webUtils 只能在 preload 里用，
+   * 因此由这里转一手（渲染层拿到的就是一个 string）。
+   */
+  pathForFile: (file: File): string => {
+    try {
+      return webUtils.getPathForFile(file)
+    } catch {
+      return ''
+    }
+  },
+
+  /**
+   * 外部文件的读写。走单独的通道而不是 storage:*：后者只认数据根下的相对路径，
+   * 而拖进来的文件在用户自己的目录里（见 electron/storage 的 LOCAL_TEXT_EXTS）。
+   */
+  local: {
+    read: (path: string): Promise<LocalReadResult> => ipcRenderer.invoke('local:read', path),
+    /** 读本地媒体文件（多媒体预览页签用）：回 mime + base64 data URL */
+    readMedia: (path: string): Promise<LocalMediaResult> => ipcRenderer.invoke('local:readMedia', path),
+    write: (path: string, content: string): Promise<LocalWriteResult> =>
+      ipcRenderer.invoke('local:write', path, content),
+    reveal: (path: string): Promise<StorageOk | StorageFail> => ipcRenderer.invoke('local:reveal', path),
+    pick: (): Promise<{ ok: boolean; canceled?: boolean; paths?: string[] }> =>
+      ipcRenderer.invoke('local:pick'),
+    /**
+     * 附件通道：**不设扩展名白名单**，读回来的是内容本身（图片给 dataUrl）。
+     * 用户要发给导师的东西不该被「归一只支持这几种文本」那条规则挡住。
+     */
+    pickAttach: (): Promise<{ ok: boolean; canceled?: boolean; paths?: string[] }> =>
+      ipcRenderer.invoke('local:pickAttach'),
+    readAttach: (path: string): Promise<AttachReadResult> => ipcRenderer.invoke('local:readAttach', path),
+    /**
+     * 把「开着页签的本地文件」清单推给主进程挂 watcher；文件在外部被改时经
+     * onChanged 推回（渲染层据此同步页签或标记保存冲突）。返回取消订阅函数。
+     */
+    watch: (paths: string[]): Promise<StorageOk> => ipcRenderer.invoke('local:watch', paths),
+    onChanged: (cb: (path: string) => void): (() => void) => {
+      const listener = (_e: unknown, changed: string) => cb(changed)
+      ipcRenderer.on('local:changed', listener)
+      return () => ipcRenderer.removeListener('local:changed', listener)
+    },
+  },
+
+  /** 为 PDF.js 提供支持 Range 请求的临时本地 URL，避免把整份 PDF 转成 Base64 经过 IPC。 */
+  pdf: {
+    open: (path: string): Promise<PdfSourceResult> => ipcRenderer.invoke('pdf:open', path),
+    close: (url: string): Promise<boolean> => ipcRenderer.invoke('pdf:close', url),
+    openExternal: (path: string): Promise<boolean> => ipcRenderer.invoke('pdf:openExternal', path),
+  },
+
+  /**
+   * 工作区目录的外部变化监听（给资源管理器）：渲染层把「此刻展开着的工作区目录」清单
+   * （绝对路径）推过来，主进程按目录挂 fs.watch；目录里一有增删改名就经 onChanged 推回。
+   * 与 local 那条的差别：不带具体路径、也不过滤文件名——重列是幂等的（只刷新列表，
+   * 不重挂编辑器），收到就是「工作区变过」，各层行各自重列。见 electron/storage/ws。
+   */
+  ws: {
+    watch: (dirs: string[]): Promise<StorageOk> => ipcRenderer.invoke('ws:watch', dirs),
+    onChanged: (cb: () => void): (() => void) => {
+      const listener = () => cb()
+      ipcRenderer.on('ws:changed', listener)
+      return () => ipcRenderer.removeListener('ws:changed', listener)
+    },
+  },
+
+  /**
+   * 外部 MCP 服务（**stdio 传输**）的本地进程会话：命令在主进程里起
+   * （渲染层拿不到 child_process），JSON-RPC 走子进程的 stdin/stdout，
+   * 会话按服务配置复用（见 electron/mcp）。SSE 传输不走这里——那条由渲染层
+   * 直接 fetch（见 src/agent/mcp/client）。
+   */
+  mcp: {
+    discover: (server: McpStdioServerPayload): Promise<McpStdioToolsResult> =>
+      ipcRenderer.invoke('mcp:discover', server),
+    call: (
+      server: McpStdioServerPayload,
+      tool: string,
+      args: Record<string, unknown>,
+    ): Promise<McpStdioCallResult> => ipcRenderer.invoke('mcp:call', server, tool, args),
+    /** 停掉某个服务的会话（设置里禁用 / 删除时来一发，不留没用的子进程）；省略 = 停掉全部 */
+    stop: (serverId?: string): Promise<StorageOk> => ipcRenderer.invoke('mcp:stop', serverId),
+  },
+
+  /**
+   * 数据落盘。渲染层传的一律是相对根目录的相对路径，越界由主进程挡掉
+   * （见 electron/storage.ts）。YAML 的解析/序列化留在主进程，
+   * 渲染层拿到的就是普通对象，格式细节只有一处。
+   */
+  storage: {
+    /** 当前根目录、默认根目录，以及是否用的默认值 */
+    info: (): Promise<StorageInfo> => ipcRenderer.invoke('storage:info'),
+
+    /** 切换根目录；不传或传空串表示恢复默认。不迁移旧目录数据 */
+    setRoot: (dir?: string): Promise<StorageRootResult> => ipcRenderer.invoke('storage:setRoot', dir),
+
+    /** 弹原生目录选择框，只返回用户选了什么 */
+    pickRoot: (): Promise<{ ok: boolean; canceled?: boolean; root?: string; error?: string }> =>
+      ipcRenderer.invoke('storage:pickRoot'),
+
+    list: (rel: string): Promise<StorageListResult> => ipcRenderer.invoke('storage:list', rel),
+
+    /** 读文本；文件不存在返回 content: null，不算错误 */
+    read: (rel: string): Promise<StorageReadResult> => ipcRenderer.invoke('storage:read', rel),
+
+    write: (rel: string, content: string): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('storage:write', rel, content),
+
+    /** 写一张图。走单独的通道：文本通道是 utf-8 的，二进制过不去 */
+    writeImage: (rel: string, dataUrl: string): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('storage:writeImage', rel, dataUrl),
+
+    /** 读一张图，回 base64 data URL */
+    readImage: (rel: string): Promise<StorageImageResult> => ipcRenderer.invoke('storage:readImage', rel),
+
+    /**
+     * 写任意扩展名的二进制（资源库）。与 writeImage 分开：那条通道按扩展名白名单
+     * 只收图片，这条不限类型（见 electron/storage.ts 的 writeBinary）。
+     */
+    writeBinary: (rel: string, dataUrl: string): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('storage:writeBinary', rel, dataUrl),
+
+    /** 读任意扩展名的二进制，回 base64 data URL（mime 由扩展名推） */
+    readBinary: (rel: string): Promise<StorageImageResult> => ipcRenderer.invoke('storage:readBinary', rel),
+
+    /** 移动文件或整个目录。改标题时用它把资源库整个挪到新目录下 */
+    move: (from: string, to: string): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('storage:move', from, to),
+
+    /** 复制文件或整个目录（工作区拖拽的 Ctrl 分支）；目标已存在时拒绝 */
+    copy: (from: string, to: string): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('storage:copy', from, to),
+
+    /** 删除文件或整个目录 */
+    remove: (rel: string): Promise<StorageOk | StorageFail> => ipcRenderer.invoke('storage:remove', rel),
+
+    /** 新建一个目录（父目录连带建起；已存在同名时拒绝，见 mkdirPath） */
+    mkdir: (rel: string): Promise<StorageOk | StorageFail> => ipcRenderer.invoke('storage:mkdir', rel),
+
+    /** 在系统文件管理器里定位某个文件（节点右键菜单用） */
+    reveal: (rel: string): Promise<StorageOk | StorageFail> => ipcRenderer.invoke('storage:reveal', rel),
+
+    readYaml: (rel: string): Promise<StorageYamlResult> => ipcRenderer.invoke('storage:readYaml', rel),
+
+    writeYaml: (rel: string, data: unknown): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('storage:writeYaml', rel, data),
+
+    /** 会话是机器本地的登录态，存在 appdata，不属于任何数据目录 */
+    readSession: (): Promise<StorageYamlResult> => ipcRenderer.invoke('storage:readSession'),
+
+    writeSession: (data: unknown): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('storage:writeSession', data),
+
+    /**
+     * 同步写一批（sendSync）。页面卸载前调用：异步写在那时已经排不上队了。
+     * 会阻塞渲染进程几毫秒，只该用在关窗这一类时刻。
+     */
+    flush: (items: FlushItem[]): { ok: boolean; failed: string[] } =>
+      ipcRenderer.sendSync('storage:flush', items),
+  },
+
+  /**
+   * 插件目录（`{root}/plugins/`）。主进程只递源码与开关，执行在渲染层
+   * （见 src/lib/plugins：那里用 new Function 编译，插件通过 register() 交回对象）。
+   */
+  plugins: {
+    list: (): Promise<PluginListResult> => ipcRenderer.invoke('plugins:list'),
+
+    read: (file: string): Promise<PluginSourceResult> => ipcRenderer.invoke('plugins:read', file),
+
+    settingsGet: (file: string): Promise<PluginSettingsResult> => ipcRenderer.invoke('plugins:settingsGet', file),
+    settingsSet: (
+      file: string,
+      values: Record<string, string | number | boolean>,
+      secrets: string[],
+    ): Promise<PluginSettingsResult> => ipcRenderer.invoke('plugins:settingsSet', file, values, secrets),
+
+    /** 开关插件；写 enabled.json，**重启后生效** */
+    setEnabled: (file: string, enabled: boolean): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('plugins:setEnabled', file, enabled),
+
+    /** 在系统文件管理器里打开插件目录（用户要往里放 .js） */
+    reveal: (): Promise<StorageOk | StorageFail> => ipcRenderer.invoke('plugins:reveal'),
+
+    /** 内置插件的开关（存在 appdata 的 global.yaml，跟机器走；只有被改过的 id 才在里面） */
+    toggles: (): Promise<PluginTogglesResult> => ipcRenderer.invoke('plugins:toggles'),
+
+    /** 改一个内置插件的开关；**重启后生效** */
+    setToggle: (id: string, enabled: boolean): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('plugins:setToggle', id, enabled),
+  },
+
+  /**
+   * 代码块伪编译的产物与联网出口（见 electron/runner.ts）。
+   *
+   * 两件事都只能在这儿做：产物要落在**数据目录**里（活过重启），
+   * 联网要被 CSP 挡在门外（渲染层的 Worker 连不上外网，只能请主进程代发）。
+   */
+  runner: {
+    /** 全量产物表（渲染层启动时拉一次，之后本地维护） */
+    artifacts: (): Promise<ArtifactListResult> => ipcRenderer.invoke('runner:artifacts'),
+
+    /** 存一份产物（按「代码 + 语言」的指纹） */
+    putArtifact: (key: string, value: CodeArtifact): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('runner:putArtifact', key, value),
+
+    /** 记下「这段代码没有输出」：导师判定的结论，落盘之后那块不再可编译、不可运行 */
+    putSilent: (key: string, value: SilentMark): Promise<StorageOk | StorageFail> =>
+      ipcRenderer.invoke('runner:putSilent', key, value),
+
+    /** 清空全部产物（设置页里的清理入口） */
+    clearArtifacts: (): Promise<StorageOk | StorageFail> => ipcRenderer.invoke('runner:clearArtifacts'),
+
+    /** 替沙箱发一次请求。**用户同不同意是渲染层弹窗的事**，这里只负责发 */
+    fetch: (url: string, init: {
+      method?: string
+      headers?: Record<string, string>
+      body?: string
+    }): Promise<RunnerFetchResult> => ipcRenderer.invoke('runner:fetch', url, init),
+  },
+
+  /**
+   * 语音：模型的下载与状态，以及一次识别。
+   * **整条链都在主进程**（见 electron/voice.ts）：渲染层的 CSP 连不上外网，
+   * 而推理走的是 sherpa-onnx 的原生构建——228 MB 的模型该直接落盘，
+   * 音频也只在这一趟 IPC 里过一下，不写盘、不留存。
+   */
+  voice: {
+    modelStatus: (): Promise<VoiceModelStatus> => ipcRenderer.invoke('voice:modelStatus'),
+
+    /** 下一份 SenseVoiceSmall（约 228 MB）；进度走 onModelProgress */
+    downloadModel: (): Promise<VoiceDownloadResult> => ipcRenderer.invoke('voice:downloadModel'),
+
+    cancelDownload: (): Promise<boolean> => ipcRenderer.invoke('voice:cancelDownload'),
+
+    /** 从本机挑一份 model.int8.onnx（词表从同一个目录里找） */
+    chooseModel: (): Promise<{ ok: boolean; canceled?: boolean; error?: string; bytes?: number }> =>
+      ipcRenderer.invoke('voice:chooseModel'),
+
+    removeModel: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('voice:removeModel'),
+
+    /** 识别一段 16 kHz 单声道 PCM：结果里带「这一趟用了多久」与后端 */
+    transcribe: (req: VoiceTranscribeRequest): Promise<VoiceTranscribeResult> =>
+      ipcRenderer.invoke('voice:transcribe', req),
+
+    /** 这台机器上有没有显卡：设置页拿它决定「GPU 加速」的默认值 */
+    gpuInfo: (): Promise<{ hasGpu: boolean; name: string }> => ipcRenderer.invoke('voice:gpuInfo'),
+
+    /** 在文件管理器里定位模型目录 */
+    revealModel: (): Promise<boolean> => ipcRenderer.invoke('voice:revealModel'),
+
+    /** 订阅下载进度；返回取消订阅函数 */
+    onModelProgress: (cb: (p: VoiceModelProgress) => void): (() => void) => {
+      const listener = (_e: unknown, p: VoiceModelProgress) => cb(p)
+      ipcRenderer.on('voice:modelProgress', listener)
+      return () => ipcRenderer.removeListener('voice:modelProgress', listener)
+    },
+  },
+  /**
+   * OCR 文字识别：多模型管理与下载、页面识别与缓存
+   */
+  ocr: {
+    modelStatus: (): Promise<OcrModelStatus> => ipcRenderer.invoke('ocr:modelStatus'),
+    setActiveModel: (modelId: string): Promise<boolean> => ipcRenderer.invoke('ocr:setActiveModel', modelId),
+    downloadModel: (req: OcrDownloadRequest): Promise<OcrDownloadResult> => ipcRenderer.invoke('ocr:downloadModel', req),
+    cancelDownload: (): Promise<boolean> => ipcRenderer.invoke('ocr:cancelDownload'),
+    chooseModel: (): Promise<{ ok: boolean; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke('ocr:chooseModel'),
+    removeModel: (modelId: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('ocr:removeModel', modelId),
+    revealModel: (): Promise<boolean> => ipcRenderer.invoke('ocr:revealModel'),
+    onModelProgress: (cb: (p: OcrModelProgress) => void): (() => void) => {
+      const listener = (_e: unknown, p: OcrModelProgress) => cb(p)
+      ipcRenderer.on('ocr:modelProgress', listener)
+      return () => ipcRenderer.removeListener('ocr:modelProgress', listener)
+    },
+    recognize: (req: OcrRecognizeRequest): Promise<OcrRecognizeResult> => ipcRenderer.invoke('ocr:recognize', req),
+    getCache: (key: string): Promise<OcrPageResult | null> => ipcRenderer.invoke('ocr:getCache', key),
+    setCache: (key: string, data: OcrPageResult): Promise<boolean> => ipcRenderer.invoke('ocr:setCache', key, data),
+  },
+  /**
+   * 自动更新。渲染层不决定任何事：什么时候查、下没下完、能不能装，
+   * 全由主进程的状态说了算，这里只转发。
+   */
+  update: {
+    /** 当前状态。挂载时先要一次，之后靠 onState 推 */
+    state: (): Promise<UpdateState> => ipcRenderer.invoke('update:state'),
+
+    /** 手动检查（设置 → 更新里的按钮）。任何时候都能查，哪怕关掉了自动更新 */
+    check: (): Promise<UpdateState> => ipcRenderer.invoke('update:check'),
+
+    /** 下载查到的那个新版本（关掉自动更新时，这一档要用户自己点） */
+    download: (): Promise<UpdateState> => ipcRenderer.invoke('update:download'),
+
+    /** 要不要自动检查并下载更新（全局设置，跟机器走） */
+    getAuto: (): Promise<boolean> => ipcRenderer.invoke('update:getAuto'),
+
+    /** 改这个开关；返回存盘后真正生效的值 */
+    setAuto: (value: boolean): Promise<boolean> => ipcRenderer.invoke('update:setAuto', value),
+
+    /** 当前更新策略（stable 正式版 / beta 尝鲜版，全局设置，跟机器走） */
+    getChannel: (): Promise<UpdateChannel> => ipcRenderer.invoke('update:getChannel'),
+
+    /**
+     * 切更新策略；返回存盘后真正生效的值。
+     * 主进程会顺手按新策略重新认定一次（旧策略查到的版本不再作数），见 electron/update.ts。
+     */
+    setChannel: (value: UpdateChannel): Promise<UpdateChannel> =>
+      ipcRenderer.invoke('update:setChannel', value),
+
+    /** 立即更新：关掉应用、静默安装、装完自动启动。只在 ready 时有效 */
+    install: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('update:install'),
+
+    /** 在系统浏览器里打开这次更新的发布页 */
+    openRelease: (): Promise<boolean> => ipcRenderer.invoke('update:openRelease'),
+
+    /**
+     * 订阅状态变化。返回取消订阅函数——组件卸载时必须调用，
+     * 否则监听会随重挂载越积越多。
+     */
+    onState: (cb: (state: UpdateState) => void): (() => void) => {
+      const listener = (_e: unknown, state: UpdateState) => cb(state)
+      ipcRenderer.on('update:state', listener)
+      return () => ipcRenderer.removeListener('update:state', listener)
+    },
+  },
+
+  window: {
+    minimize: () => ipcRenderer.send('window:minimize'),
+    toggleMaximize: () => ipcRenderer.send('window:toggleMaximize'),
+    close: () => ipcRenderer.send('window:close'),
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke('window:isMaximized'),
+    /** 打开 / 重新打开开发者工具（已开则先关后开，保证它浮在最上层） */
+    devtools: (): void => ipcRenderer.send('window:devtools'),
+    /**
+     * 订阅最大化状态变化（自绘标题栏据此换图标）。
+     * 返回取消订阅函数——组件卸载时必须调用，否则监听会随重挂载越积越多。
+     */
+    onMaximizeChange: (cb: (maximized: boolean) => void): (() => void) => {
+      const listener = (_e: unknown, maximized: boolean) => cb(maximized)
+      ipcRenderer.on('window:maximizeChange', listener)
+      return () => ipcRenderer.removeListener('window:maximizeChange', listener)
+    },
+    /** 提示音（api.tiktok）：主进程走 Electron 的 beep */
+    beep: (): void => ipcRenderer.send('window:beep'),
+    /**
+     * 截取窗口内容的一块（文档区截图用）：rect 是相对窗口内容区的 CSS 像素矩形，
+     * 省略则截整窗。返回 PNG data URL。
+     */
+    capture: (rect?: { x: number; y: number; width: number; height: number }): Promise<CaptureResult> =>
+      ipcRenderer.invoke('window:capture', rect),
+    /** logo.svg 原文（运行时给任务栏 / 托盘图标染色用，见 lib/appIcon） */
+    logoSource: (): Promise<string> => ipcRenderer.invoke('app:logoSource'),
+    /** 把染色后的 PNG 设为窗口（任务栏）与托盘图标 */
+    setAppIcon: (dataUrl: string): Promise<boolean> => ipcRenderer.invoke('app:setAppIcon', dataUrl),
+    /** 一条系统级通知（Windows toast）：点击把主窗口叫到前台。守卫的警告与熔断用它 */
+    notify: (payload: { title: string; body?: string }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('notify', payload),
+    /**
+     * 主窗口「闪现置顶」：钉在最上层亮出来但不抢焦点，拿到焦点或超时自动解除
+     * （见 electron/app/mainWindow.ts 的 flashMainWindow）。守卫的分心警告用它。
+     */
+    flashTop: (): void => ipcRenderer.send('window:flashTop'),
+    /** 获取系统当前获得焦点的应用名称（严格专注守卫用） */
+    getFocusedApp: (): Promise<string> => ipcRenderer.invoke('window:getFocusedApp'),
+  },
+
+  /**
+   * 考试窗口的**主窗口那一侧**。
+   *
+   * 考试窗口是第二个 BrowserWindow，加载的是**同一份渲染产物**（`?examWindow=1` 分支，
+   * 见 electron/main.ts 的 openExamWindow）。主进程在这条链路上只做三件事：开窗、转发、关窗，
+   * **不解释任何考试数据**（载荷一律 unknown 原样中转）。
+   *
+   * 两侧的分工也照此定死：主窗口是**唯一的数据拥有者**（答案、答题顺序、切屏记录、判分结果
+   * 都由它落盘），考试窗口只发事件、收状态。这样「谁是权威」不靠约定靠结构。
+   */
+  examHost: {
+    /**
+     * 开考试窗口。已经开着就把那一个叫到前面来（reused: true），不另开第二个——
+     * 两个窗口对着同一份试卷各记一份答题时间，事后谁都说不清哪份算数。
+     *
+     * payload 是「开窗时顺手带过去」的那份状态（主进程不看它，页面加载完后补发一次）。
+     * **不能当可靠投递**：渲染层的 onState 往往比 did-finish-load 挂得晚。
+     * 稳妥的写法是拿到 { ok: true } 之后自己 push 一份，或等考试界面 emit 一个「准备好了」。
+     */
+    open: (payload: unknown): Promise<ExamOpenResult> => ipcRenderer.invoke('exam:open', payload),
+
+    /** 把当前状态推给考试窗口（两边自己约定的形状，主进程不看） */
+    push: (payload: unknown): void => ipcRenderer.send('exam:push', payload),
+
+    /** 要求关掉考试窗口。走这条路的关闭不再弹确认（主窗口已经问过了） */
+    close: (): void => ipcRenderer.send('exam:close'),
+
+    /**
+     * 订阅考试窗口发来的事件。返回取消订阅函数——组件卸载时必须调用，
+     * 否则监听会随重挂载越积越多。
+     */
+    onEvent: (cb: (payload: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, payload: unknown) => cb(payload)
+      ipcRenderer.on('exam:windowEvent', listener)
+      return () => ipcRenderer.removeListener('exam:windowEvent', listener)
+    },
+
+    /**
+     * 考试窗口关掉了（任何原因，含用户确认放弃、主窗口要求、应用退出）。
+     * 主窗口据此收尾：停掉那边的计时、把状态从「考试中」放下来。
+     */
+    onClosed: (cb: (info: { reason: string }) => void): (() => void) => {
+      const listener = (_e: unknown, info: { reason: string }) => cb(info)
+      ipcRenderer.on('exam:windowClosed', listener)
+      return () => ipcRenderer.removeListener('exam:windowClosed', listener)
+    },
+
+    /** 裁切手写答案图片（由 Agent 阅卷工具或考试回看调用） */
+    cropImage: (payload: {
+      imagePath: string
+      box: CropBoxInput
+      rotate?: number
+      sheetRotate?: number
+    }): Promise<CropImageResult> => ipcRenderer.invoke('exam:cropImage', payload),
+
+    /** 裁切预检：绘制红框回传供模型审查 */
+    previewCrop: (payload: {
+      imagePath: string
+      box: CropBoxInput
+      rotate?: number
+      sheetRotate?: number
+    }): Promise<PreviewCropResult> => ipcRenderer.invoke('exam:previewCrop', payload),
+
+    /** 顺时针旋转手写答卷 */
+    rotateSheet: (payload: { imagePath: string; degrees: number }): Promise<RotateImageResult> =>
+      ipcRenderer.invoke('exam:rotateSheet', payload),
+  },
+
+  /**
+   * 考试窗口的**考试窗口那一侧**。
+   *
+   * 这一侧只能发事件、收状态、要求全屏、放行关闭——**没有任何一条通道能写盘**：
+   * 考试数据一律回主窗口，由它落盘（见上面 examHost 的说明）。
+   */
+  examGuest: {
+    /** 向主窗口发一个事件（开始考试、作答、交卷…形状由两侧自己约定，主进程不看） */
+    emit: (payload: unknown): void => ipcRenderer.send('exam:emit', payload),
+    /** 考试窗口主动获取主进程缓存的初始状态（避免单向通知的竞态时序造成白屏） */
+    getInitialState: (): Promise<unknown> => ipcRenderer.invoke('exam:getInitialState'),
+
+    /** 订阅主窗口推来的状态；返回取消订阅函数（组件卸载时必须调用） */
+    onState: (cb: (payload: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, payload: unknown) => cb(payload)
+      ipcRenderer.on('exam:state', listener)
+      return () => ipcRenderer.removeListener('exam:state', listener)
+    },
+
+    /**
+     * 用户试图关窗（系统关闭键 / Alt+F4 / 界面上的退出按钮）。
+     *
+     * 主进程已经把默认行为挡住了：要不要弹一次「确认放弃」，由考试界面自己决定
+     * （未开始就退出 → 直接 allowClose；考到一半 → 先问）。主进程不问，因为它不知道
+     * 这一场到底开没开始。
+     */
+    onConfirmClose: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on('exam:confirmClose', listener)
+      return () => ipcRenderer.removeListener('exam:confirmClose', listener)
+    },
+
+    /** 开始考试后全屏（退出全屏传 false） */
+    setFullscreen: (on: boolean): void => ipcRenderer.send('exam:fullscreen', on === true),
+
+    /**
+     * 「确认放弃 / 已交卷」之后放行关闭。放行只是**许可**，真正关窗还要界面自己调
+     * window.close()——这样「先确认、再关」的顺序看得见，不会出现确认框还没画出来
+     * 窗口就没了的情况。
+     */
+    allowClose: (): void => ipcRenderer.send('exam:allowClose'),
+    cropImage: (payload: {
+      imagePath: string
+      box: CropBoxInput
+      rotate?: number
+      sheetRotate?: number
+    }): Promise<CropImageResult> => ipcRenderer.invoke('exam:cropImage', payload),
+
+    previewCrop: (payload: {
+      imagePath: string
+      box: CropBoxInput
+      rotate?: number
+      sheetRotate?: number
+    }): Promise<PreviewCropResult> => ipcRenderer.invoke('exam:previewCrop', payload),
+
+    rotateSheet: (payload: { imagePath: string; degrees: number }): Promise<RotateImageResult> =>
+      ipcRenderer.invoke('exam:rotateSheet', payload),
+  },
+
+  /**
+   * 上下文轨迹窗口（第三个 BrowserWindow，`?contextTrace=1` 分支，见 app/traceWindow）的
+   * **主窗口那一侧**。轨迹是**纯只读**的：主窗口把当前会话的原始数据整份推过去，轨迹
+   * 窗口没有任何回发通道。已经开着再 open 会聚焦并把数据换成新会话的。
+   */
+  traceHost: {
+    /** 开轨迹窗口（payload = 当前会话数据）；已经开着就聚焦并换数据（reused: true） */
+    open: (payload: unknown): Promise<ExamOpenResult> => ipcRenderer.invoke('trace:open', payload),
+    /** 把当前会话数据推给轨迹窗口（主窗口侧随数据变化持续推） */
+    push: (payload: unknown): void => ipcRenderer.send('trace:push', payload),
+    /** 轨迹窗口关掉了（任何原因）；主窗口据此停止推送。返回取消订阅函数 */
+    onClosed: (cb: () => void): (() => void) => {
+      const listener = () => cb()
+      ipcRenderer.on('trace:windowClosed', listener)
+      return () => ipcRenderer.removeListener('trace:windowClosed', listener)
+    },
+  },
+
+  /** 轨迹窗口那一侧：只收状态，没有任何写盘或回发通道 */
+  traceGuest: {
+    /** 订阅主窗口推来的会话数据；返回取消订阅函数（组件卸载时必须调用） */
+    onState: (cb: (payload: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, payload: unknown) => cb(payload)
+      ipcRenderer.on('trace:state', listener)
+      return () => ipcRenderer.removeListener('trace:state', listener)
+    },
+  },
+
+  /**
+   * 外壳行为：关窗策略与托盘。
+   *
+   * 策略存在主进程（appdata 里的 global.yaml），这里只负责读写：真正拦关窗的是主进程，
+   * 渲染层再存一份迟早会不一致。
+   */
+  /**
+   * 抓网页。渲染层的 fetch 受同源策略约束（抓任意站点一律被 CORS 挡下），
+   * 所以字节由主进程取（见 electron/web）：这里只是那一个频道的转发。
+   */
+  web: {
+    fetch: (url: string): Promise<WebFetchResult> => ipcRenderer.invoke('web:fetch', url),
+    /** 抓一个网络二进制（图片/PDF，web:fetchBinary）：字节以 base64 data URL 过 IPC，api.see 的取字节通道 */
+    fetchBinary: (url: string): Promise<WebBinaryFetchResult> => ipcRenderer.invoke('web:fetchBinary', url),
+  },
+
+  /**
+   * 视频学习（实验）：来源插件的两条通道（见 electron/video-net）。
+   * fetch —— 插件的 API 请求（只读 GET，允许 Referer/Cookie 这类防盗链头）；
+   * openStream —— 把媒体流地址与请求头登记进主进程，换回 media-relay:// 中转地址
+   * 给 `<video>` 用。**每次播放前都要重新 openStream**：平台流地址带签名、会过期。
+   */
+  video: {
+    fetch: (url: string, headers?: Record<string, string>): Promise<VideoApiFetchResult> =>
+      ipcRenderer.invoke('video:fetch', url, headers ?? {}),
+    openStream: (url: string, headers?: Record<string, string>): Promise<VideoStreamOpenResult> =>
+      ipcRenderer.invoke('video:openStream', url, headers ?? {}),
+  },
+
+  /**
+   * 内置浏览器页签（见 src/components/learn/web 与 electron/app/webSession）。
+   * 两条都是主进程推、渲染层收：
+   * - onOpenTab —— 网页的弹窗 / target=_blank 要开的新页签（拦截与协议判定在主进程）；
+   * - onShortcut —— 焦点在网页里时按下的应用快捷键（Ctrl+Q/W/L），转发回来当 DOM 键用。
+   * - onGuestInput —— guest 里的鼠标指针事件（electron/guestPreload 上报），
+   *   渲染层据此在 <webview> 元素上合成可冒泡的 PointerEvent。
+   * 都返回取消订阅函数。
+   */
+  browser: {
+    onOpenTab: (cb: (url: string) => void): (() => void) => {
+      const listener = (_e: unknown, url: string): void => cb(url)
+      ipcRenderer.on('web:openTab', listener)
+      return () => ipcRenderer.removeListener('web:openTab', listener)
+    },
+    onShortcut: (cb: (key: string) => void): (() => void) => {
+      const listener = (_e: unknown, key: string): void => cb(key)
+      ipcRenderer.on('web:shortcut', listener)
+      return () => ipcRenderer.removeListener('web:shortcut', listener)
+    },
+    onGuestInput: (
+      cb: (p: { wcId: number; type: string; button: number; buttons: number; x: number; y: number }) => void,
+    ): (() => void) => {
+      const listener = (_e: unknown, p: Parameters<typeof cb>[0]): void => cb(p)
+      ipcRenderer.on('web:guest-input', listener)
+      return () => ipcRenderer.removeListener('web:guest-input', listener)
+    },
+    onTranslate: (cb: (payload: WebTranslatePayload) => void): (() => void) => {
+      const listener = (_e: unknown, p: WebTranslatePayload): void => cb(p)
+      ipcRenderer.on('web:translate', listener)
+      return () => ipcRenderer.removeListener('web:translate', listener)
+    },
+    fastTranslate: (text: string, targetLang?: string): Promise<WebFastTranslateResult> =>
+      ipcRenderer.invoke('web:fastTranslate', { text, targetLang }),
+    /** 页面快照：Accessibility 树 → 带 ref 的可交互元素清单（browser.* 的「看」通道） */
+    snapshot: (wcId: number): Promise<WebSnapshotResult> => ipcRenderer.invoke('web:snapshot', wcId),
+    /** 页面滚到目标元素并高亮突出（browser.point） */
+    point: (wcId: number, target: { ref: number } | { selector: string }): Promise<WebPointResult> =>
+      ipcRenderer.invoke('web:point', wcId, target),
+    /** 对 snapshot 的 ref 执行受控 DOM 操作（browser.dom）：固定函数 + 值参数 */
+    domOp: (wcId: number, ref: number, op: string, arg?: string): Promise<WebDomOpResult> =>
+      ipcRenderer.invoke('web:domOp', wcId, ref, op, arg),
+    /** 拿当前页的整份 DOM HTML（渲染层走 webFetch 同一条 markdown 管线，browser.read） */
+    readHtml: (wcId: number): Promise<WebReadHtmlResult> => ipcRenderer.invoke('web:readHtml', wcId),
+    /** 页签日志清单（折叠去重，见 shared/webLogs）——browser.logs */
+    logs: (wcId: number, opts?: WebLogsOpts): Promise<WebLogsResult> =>
+      ipcRenderer.invoke('web:logs', wcId, opts ?? {}),
+    /** 单条日志详情（完整头/栈/响应体）——browser.logDetail */
+    logDetail: (wcId: number, seq: number, opts?: { maxBody?: number }): Promise<WebLogDetailResult> =>
+      ipcRenderer.invoke('web:logDetail', wcId, seq, opts ?? {}),
+    /** 页面上下文直发 HTTP（继承页签登录态；{reqId} 重放捕获的请求）——browser.fetch */
+    pageFetch: (wcId: number, req: WebPageFetchReq): Promise<WebPageFetchResult> =>
+      ipcRenderer.invoke('web:pageFetch', wcId, req),
+    /** 日志录制（start 钉水位 / stop 回区间清单）——browser.record */
+    record: (wcId: number, action: 'start' | 'stop', opts?: WebLogsOpts): Promise<WebRecordResult> =>
+      ipcRenderer.invoke('web:record', wcId, action, opts ?? {}),
+    /** 区域文本（渲染后的 innerText，按 ref/selector 取）——browser.text */
+    text: (wcId: number, target: WebTextTarget): Promise<WebTextResult> =>
+      ipcRenderer.invoke('web:text', wcId, target),
+    /** 滚页面（by/to/ref）——browser.scroll */
+    scroll: (wcId: number, req: WebScrollReq): Promise<WebScrollResult> =>
+      ipcRenderer.invoke('web:scroll', wcId, req),
+    /** 等条件成立（selector/text/urlIncludes/networkIdle/load）——browser.waitFor */
+    waitFor: (wcId: number, req: WebWaitReq): Promise<WebWaitResult> =>
+      ipcRenderer.invoke('web:waitFor', wcId, req),
+  },
+
+  shell: {
+    /** 当前关窗行为 */
+    getCloseBehavior: (): Promise<CloseBehavior> => ipcRenderer.invoke('shell:getCloseBehavior'),
+
+    setCloseBehavior: (value: CloseBehavior): Promise<CloseBehavior> =>
+      ipcRenderer.invoke('shell:setCloseBehavior', value),
+
+    /** 回答关窗询问；remember 为真时把这次的选择存成策略 */
+    decideClose: (action: CloseAction, remember: boolean): Promise<{ ok: boolean; behavior: CloseBehavior }> =>
+      ipcRenderer.invoke('window:closeDecision', action, remember),
+
+    /**
+     * 用系统浏览器打开一个地址（http / https / mailto）。
+     * 协议判定在主进程（见 electron/link-core）：渲染层能被开发者工具改，这条边界不能只靠它自觉。
+     */
+    openExternal: (url: string): Promise<boolean> => ipcRenderer.invoke('shell:openExternal', url),
+
+    /** 立刻收进托盘（设置面板里的按钮） */
+    hideToTray: (): void => ipcRenderer.send('window:hideToTray'),
+
+    /**
+     * 订阅「主进程要关窗，问一下」——只在策略是「询问」时才会来。
+     * 返回取消订阅函数，组件卸载时必须调用。
+     */
+    onCloseRequested: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on('window:closeRequested', listener)
+      return () => ipcRenderer.removeListener('window:closeRequested', listener)
+    },
+  },
+  /**
+   * 远程公告在本机的状态（要不要自动弹、上次弹时的版本号、读过哪些 id）。
+   * 与关窗行为一样属于「跟机器走」的全局设置，落在同一份 global.yaml
+   * （见 electron/storage/settings.ts）；渲染层 src/lib/notice.ts 读写它。
+   */
+  notice: {
+    get: (): Promise<NoticeSettings> => ipcRenderer.invoke('notice:get'),
+
+    /** 按字段合并着改（只改传进来的那几项） */
+    set: (patch: Partial<NoticeSettings>): Promise<NoticeSettings> =>
+      ipcRenderer.invoke('notice:set', patch),
+
+    getCachedImage: (url: string): Promise<string | null> =>
+      ipcRenderer.invoke('notice:getCachedImage', url),
+
+    cacheImage: (url: string, dataUrl: string): Promise<boolean> =>
+      ipcRenderer.invoke('notice:cacheImage', url, dataUrl),
+
+    clearImageCache: (): Promise<boolean> =>
+      ipcRenderer.invoke('notice:clearImageCache'),
+  },
+
+  files: {
+    read: (p: string, opts?: { encoding?: 'utf8' | 'base64' | 'binary'; maxBytes?: number; offset?: number }): Promise<BaseFileReadResult> =>
+      ipcRenderer.invoke('base:files:read', p, opts),
+    write: (p: string, content: string, opts?: { encoding?: 'utf8' | 'base64'; overwrite?: boolean }): Promise<BaseFileWriteResult> =>
+      ipcRenderer.invoke('base:files:write', p, content, opts),
+    edit: (p: string, opts?: BaseFileEditOpts): Promise<BaseFileEditResult> =>
+      ipcRenderer.invoke('base:files:edit', p, opts),
+    list: (p?: string): Promise<BaseFileListResult> =>
+      ipcRenderer.invoke('base:files:list', p),
+    stat: (p: string): Promise<BaseFileStatResult> =>
+      ipcRenderer.invoke('base:files:stat', p),
+    mkdir: (p: string): Promise<BaseFileOpResult> =>
+      ipcRenderer.invoke('base:files:mkdir', p),
+    copy: (from: string, to: string, opts?: { overwrite?: boolean }): Promise<BaseFileOpResult> =>
+      ipcRenderer.invoke('base:files:copy', from, to, opts),
+    move: (from: string, to: string): Promise<BaseFileOpResult> =>
+      ipcRenderer.invoke('base:files:move', from, to),
+    delete: (p: string): Promise<BaseFileOpResult> =>
+      ipcRenderer.invoke('base:files:delete', p),
+    onChanged: (cb: (payload: { path: string; action: string; content?: string }) => void): (() => void) => {
+      const listener = (_e: unknown, payload: { path: string; action: string; content?: string }) => cb(payload)
+      ipcRenderer.on('base:files:changed', listener)
+      return () => ipcRenderer.removeListener('base:files:changed', listener)
+    },
+  },
+
+  process: {
+    create: (opts: BaseProcessCreateOpts): Promise<BaseProcessCreateResult> =>
+      ipcRenderer.invoke('base:process:create', opts),
+    start: (id: string): Promise<BaseProcessStartResult> =>
+      ipcRenderer.invoke('base:process:start', id),
+    status: (id: string): Promise<BaseProcessStatusResult> =>
+      ipcRenderer.invoke('base:process:status', id),
+    output: (id: string, opts?: { offset?: number; reset?: boolean }): Promise<BaseProcessOutputResult> =>
+      ipcRenderer.invoke('base:process:output', id, opts),
+    stop: (id: string, opts?: { timeoutMs?: number; force?: boolean }): Promise<BaseProcessStopResult> =>
+      ipcRenderer.invoke('base:process:stop', id, opts),
+    list: (): Promise<BaseProcessListResult> =>
+      ipcRenderer.invoke('base:process:list'),
+    get: (id: string): Promise<BaseProcessGetResult> =>
+      ipcRenderer.invoke('base:process:get', id),
+    delete: (id: string): Promise<BaseProcessDeleteResult> =>
+      ipcRenderer.invoke('base:process:delete', id),
+  },
+
+  syncPermissions: (dirs: string[]): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('base:permissions:sync', dirs),
+
+  /**
+   * 项目节点路径的文件操作（声明即授权）：请求里随行本次允许的 roots
+   * （渲染层从 store 现取的已声明 project 根），主进程校验路径落根内才执行。
+   * 见 shared/ipc 的 ProjectFsRequest 与 electron/base/projectFiles。
+   */
+  projectFs: (req: ProjectFsRequest): Promise<ProjectFsResult> =>
+    ipcRenderer.invoke('project:fs', req),
+
+  /** 系统目录选择器：挑一条真实路径给项目节点（取消回 { canceled: true, path: null }） */
+  pickProjectDirectory: (): Promise<{ canceled: boolean; path: string | null }> =>
+    ipcRenderer.invoke('project:pickDirectory'),
+
+  base: {
+    files: {
+      read: (p: string, opts?: { encoding?: 'utf8' | 'base64' | 'binary'; maxBytes?: number; offset?: number }): Promise<BaseFileReadResult> =>
+        ipcRenderer.invoke('base:files:read', p, opts),
+      write: (p: string, content: string, opts?: { encoding?: 'utf8' | 'base64'; overwrite?: boolean }): Promise<BaseFileWriteResult> =>
+        ipcRenderer.invoke('base:files:write', p, content, opts),
+      edit: (p: string, opts?: BaseFileEditOpts): Promise<BaseFileEditResult> =>
+        ipcRenderer.invoke('base:files:edit', p, opts),
+      list: (p?: string): Promise<BaseFileListResult> =>
+        ipcRenderer.invoke('base:files:list', p),
+      stat: (p: string): Promise<BaseFileStatResult> =>
+        ipcRenderer.invoke('base:files:stat', p),
+      mkdir: (p: string): Promise<BaseFileOpResult> =>
+        ipcRenderer.invoke('base:files:mkdir', p),
+      copy: (from: string, to: string, opts?: { overwrite?: boolean }): Promise<BaseFileOpResult> =>
+        ipcRenderer.invoke('base:files:copy', from, to, opts),
+      move: (from: string, to: string): Promise<BaseFileOpResult> =>
+        ipcRenderer.invoke('base:files:move', from, to),
+      delete: (p: string): Promise<BaseFileOpResult> =>
+        ipcRenderer.invoke('base:files:delete', p),
+      onChanged: (cb: (payload: { path: string; action: string; content?: string }) => void): (() => void) => {
+        const listener = (_e: unknown, payload: { path: string; action: string; content?: string }) => cb(payload)
+        ipcRenderer.on('base:files:changed', listener)
+        return () => ipcRenderer.removeListener('base:files:changed', listener)
+      },
+    },
+    process: {
+      create: (opts: BaseProcessCreateOpts): Promise<BaseProcessCreateResult> =>
+        ipcRenderer.invoke('base:process:create', opts),
+      start: (id: string): Promise<BaseProcessStartResult> =>
+        ipcRenderer.invoke('base:process:start', id),
+      status: (id: string): Promise<BaseProcessStatusResult> =>
+        ipcRenderer.invoke('base:process:status', id),
+      output: (id: string, opts?: { offset?: number; reset?: boolean }): Promise<BaseProcessOutputResult> =>
+        ipcRenderer.invoke('base:process:output', id, opts),
+      stop: (id: string, opts?: { timeoutMs?: number; force?: boolean }): Promise<BaseProcessStopResult> =>
+        ipcRenderer.invoke('base:process:stop', id, opts),
+      list: (): Promise<BaseProcessListResult> =>
+        ipcRenderer.invoke('base:process:list'),
+      get: (id: string): Promise<BaseProcessGetResult> =>
+        ipcRenderer.invoke('base:process:get', id),
+      delete: (id: string): Promise<BaseProcessDeleteResult> =>
+        ipcRenderer.invoke('base:process:delete', id),
+    },
+    syncPermissions: (dirs: string[]): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('base:permissions:sync', dirs),
+  },
+  /** 局域网互联服务器与移动端文件传输 */
+  lan: {
+    startServer: (port?: number): Promise<LanServerStatus> =>
+      ipcRenderer.invoke('lan:start', port),
+    stopServer: (): Promise<boolean> =>
+      ipcRenderer.invoke('lan:stop'),
+    getStatus: (): Promise<LanServerStatus> =>
+      ipcRenderer.invoke('lan:status'),
+    setSelectedIp: (ip: string): Promise<LanServerStatus> =>
+      ipcRenderer.invoke('lan:select-ip', ip),
+    getQrDataUrl: (ip?: string): Promise<string> =>
+      ipcRenderer.invoke('lan:get-qr', ip),
+    requestDeviceFile: (options?: LanRequestFileOptions): Promise<LanRequestFileResult> =>
+      ipcRenderer.invoke('lan:request-file', options),
+    cancelRequests: (reason?: string): Promise<void> =>
+      ipcRenderer.invoke('lan:cancel-requests', reason),
+    openFile: (filePath: string): Promise<void> =>
+      ipcRenderer.invoke('lan:open-file', filePath),
+    showInFolder: (filePath: string): Promise<void> =>
+      ipcRenderer.invoke('lan:show-in-folder', filePath),
+    onStatusChange: (cb: (status: LanServerStatus) => void): (() => void) => {
+      const handler = (_: unknown, s: LanServerStatus) => cb(s)
+      ipcRenderer.on('lan:status-changed', handler)
+      return () => { ipcRenderer.removeListener('lan:status-changed', handler) }
+    },
+    onFileReceived: (cb: (file: LanUploadedFile) => void): (() => void) => {
+      const handler = (_: unknown, f: LanUploadedFile) => cb(f)
+      ipcRenderer.on('lan:file-received', handler)
+      return () => { ipcRenderer.removeListener('lan:file-received', handler) }
+    },
+    onDevicesChange: (cb: (devices: LanDeviceInfo[]) => void): (() => void) => {
+      const handler = (_: unknown, d: LanDeviceInfo[]) => cb(d)
+      ipcRenderer.on('lan:devices-changed', handler)
+      return () => { ipcRenderer.removeListener('lan:devices-changed', handler) }
+    },
+  },
+  tools: {
+    captureScreen: (): Promise<ScreenCaptureResult> => ipcRenderer.invoke('tools:capture-screen'),
+    openScreenshot: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('screenshot:open'),
+    getScreenshotImage: (): Promise<string | null> => ipcRenderer.invoke('screenshot:getImage'),
+    getScreenshotSystemRects: (): Promise<Array<{ x: number; y: number; width: number; height: number }>> => ipcRenderer.invoke('screenshot:getSystemRects'),
+    onScreenshotUpdate: (cb: (payload: { imageSrc: string; systemRects?: Array<{ x: number; y: number; width: number; height: number }> }) => void): (() => void) => {
+      const handler = (_: unknown, data: { imageSrc: string; systemRects?: Array<{ x: number; y: number; width: number; height: number }> }) => cb(data)
+      ipcRenderer.on('screenshot:update', handler)
+      return () => { ipcRenderer.removeListener('screenshot:update', handler) }
+    },
+    notifyScreenshotReady: (): void => { ipcRenderer.send('screenshot:ready') },
+    closeScreenshot: (): void => { ipcRenderer.send('screenshot:close') },
+    confirmScreenshot: (dataUrl: string): Promise<ImageCopyResult> => ipcRenderer.invoke('screenshot:confirm', dataUrl),
+    pinScreenshot: (pinnedItem: unknown): void => { ipcRenderer.send('screenshot:pin', pinnedItem) },
+    saveScreenshot: (payload: ImageSavePayload): Promise<ImageSaveResult> => ipcRenderer.invoke('screenshot:save', payload),
+    getPinData: (id: string): Promise<any> => ipcRenderer.invoke('pin:getData', id),
+    closePin: (id: string): void => { ipcRenderer.send('pin:close', id) },
+    copyPin: (id: string): Promise<ImageCopyResult> => ipcRenderer.invoke('pin:copy', id),
+    savePin: (id: string): Promise<ImageSaveResult> => ipcRenderer.invoke('pin:save', id),
+    notifyPinReady: (id: string): void => { ipcRenderer.send('pin:ready', id) },
+    movePin: (id: string, dx: number, dy: number): void => { ipcRenderer.send('pin:move', { id, dx, dy }) },
+    zoomPin: (id: string, zoomFactor: number): void => { ipcRenderer.send('pin:zoom', { id, zoomFactor }) },
+    copyImage: (dataUrl: string): Promise<ImageCopyResult> => ipcRenderer.invoke('tools:copy-image', dataUrl),
+    saveImage: (payload: ImageSavePayload): Promise<ImageSaveResult> => ipcRenderer.invoke('tools:save-image', payload),
+    startRecord: (): Promise<ScreenRecordResult> => ipcRenderer.invoke('tools:record-screen'),
+    onPinnedScreenshot: (cb: (item: unknown) => void): (() => void) => {
+      const handler = (_: unknown, item: unknown) => cb(item)
+      ipcRenderer.on('tools:pinned-screenshot', handler)
+      return () => { ipcRenderer.removeListener('tools:pinned-screenshot', handler) }
+    },
+  },
+}
+
+export type MojiNative = typeof api
+
+contextBridge.exposeInMainWorld('mojiNative', api)

@@ -1,0 +1,546 @@
+/**
+ * 这个文件负责：资源管理器侧栏的**外壳**——aside 那一块、右边那条拖宽把手、三个分区
+ * （学习目标 / 收藏 / 本地文件）的接线，以及节点行与右键菜单的挂载。
+ * 树在 explorer/NodeRow，菜单在 explorer/RowMenu，分类夹的零件（Section / FolderRow /
+ * Collapse / Indent）在 explorer/Folder，展开状态与宽度分别由 explorer/useTreeExpand、
+ * explorer/useSidebarWidth 管；「当前页签 → 树里那一行」的定位在 explorer/reveal，
+ * 外壳只负责发令（算出目标、展开、广播、滚动）。
+ *
+ * 「最近打开」不再在这里（用户定的）：那个区挪去了文档区的**空白页签**（见
+ * workspace/chrome 的 EmptyDoc）——「我刚才在看什么」放在「正要开始看」的那一页上，
+ * 点开就是接着看，比在侧栏里另起一区更顺路。
+ */
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, memo } from 'react'
+import type { FavoriteRef, KnowledgeNode, LearnStore, TabRef, VideoResource } from '../../learn/types'
+import { nodeById, normalizeKey } from '../../learn/graph'
+import { EXPLORER_WIDTH_MAX, EXPLORER_WIDTH_MIN } from '../../lib/appearance'
+import { userAbsPrefix } from '../../lib/storage'
+import Logo from '../Logo'
+import { NewGoalIcon, OpenLocalIcon } from '../icons'
+import { PanelLeftClose, PanelLeftOpen, Plus, Settings } from 'lucide-react'
+import { NodeRow } from './explorer/NodeRow'
+import { RowMenu } from './explorer/RowMenu'
+import { FavoriteSection, LocalRow, VideoRow } from './explorer/sections'
+import { Section, SectionAction } from './explorer/Folder'
+import {
+  publishReveal,
+  revealOfTab,
+  revealRequestVersion,
+  revealRow,
+  revealSigOf,
+  subscribeReveal,
+  subscribeRevealRequest,
+} from './explorer/reveal'
+import { notifyWsChanged } from './explorer/wsChanges'
+import { native, isWeb } from '../../lib/native'
+import SystemAudioWave from './SystemAudioWave'
+import { useSidebarWidth } from './explorer/useSidebarWidth'
+import { useTreeExpand } from './explorer/useTreeExpand'
+import type { ExamActions, MenuState, MenuTarget, NodeDocActions, WsActions } from './explorer/types'
+import { t } from '../../i18n'
+
+// 原有的三个具名导出照旧从本文件出去（它们搬到了 explorer/types.ts，这里 re-export：调用方零改动）
+export type { ExamActions, NodeDocActions, WsActions } from './explorer/types'
+
+/**
+ * 资源管理器侧栏：知识节点 + 本地文件两个可折叠的区。
+ *
+ * 为什么从「知识节点栏」改成资源管理器：页面上的东西变多了——除了知识点，还有拖进来
+ * 浏览的本地文件，以及后面可能加的更多来源。全平铺地堆在一条列表里，用户没法回答
+ * 「我现在看的是哪一类东西」。分区之后每类各自折叠、各自计数，与 vscode 的资源管理器同构。
+ *
+ * 两个默认：**都默认展开**（用户打开侧栏就是想知道里面有什么），
+ * **本地文件区没有内容时整块不显示**——一个永远空着的分区只会占地方。
+ *
+ * 一棵节点行里挂着**三样孩子**：与节点强制绑定的学习文档（置顶）、下级节点（知识结构）
+ * 与这个节点自己的其他文档（笔记 / 试卷 / 超级文档）。从前文档只散在文档区右上角那几块
+ * tip 里，「这个节点有什么」在侧栏看不见，而侧栏本来就是回答那个问题的地方。
+ * 文档行因此长得与节点行不一样：小一档、点一下开页签；右键则给出这一类东西能做的事
+ * （打开 / 改名 / 在资源管理器中定位 / 删除 / 开考）。焦点格开着哪份文档，哪一行就亮。
+ */
+
+interface Props {
+  store: LearnStore
+  /** 视频资源（用户创建并绑定住的来源，见 learn/types 的 VideoResource） */
+  videos: VideoResource[]
+  /** 打开某个视频的绑定页签 */
+  onOpenVideo: (id: string) => void
+  /** 删除一个视频资源（调用方负责落库） */
+  onDeleteVideo: (id: string) => void
+  /** 新建视频：开创建态页签（入口从顶栏挪到这里，用户定的） */
+  onNewVideo: () => void
+  /**
+   * 当前**选中**的节点：由激活的页签推出，而不是「上次点过的节点」。
+   * 关掉某个节点的教学文档页签，它就不该再是选中样式（见 LearnWorkspace）。
+   */
+  activeNodeId: string | null
+  /** 焦点格正在显示的那份文档：树里的**文档行**也据此亮起来（不只节点行） */
+  activeTab: TabRef | null
+  busyNodeId: string | null
+  open: boolean
+  /** 纯净阅读：整栏收起让位（见 LearnWorkspace 的 F11）；窄屏下本来就是个抽屉，不必管 */
+  pure: boolean
+  onClose: () => void
+  onSelectNode: (nodeId: string) => void
+  /**
+   * 点**目标节点**文字：切到它的目标页签组（大纲 + 这个目标下开着的东西）。
+   * 与 onSelectNode（打开教学文档）分开，是因为两者现在语义不同（见 LearnWorkspace 的
+   * openGoalGroup 与 switchNode）。
+   */
+  onSelectGoal: (nodeId: string) => void
+  /** 当前活动目标 id：目标行拿它判高亮 */
+  activeGoalId: string | null
+  onNewGoal: () => void
+  onDeleteNode: (nodeId: string) => void
+  /** 在系统文件管理器里定位该节点的正文文件（节点右键菜单） */
+  onRevealNode: (nodeId: string) => void
+  /** 定位工作区目录里的真实文件 / 子目录（docs/…/workspace/…，见 learn/workspace） */
+  onRevealWs: (rel: string) => void
+  /** 工作区文件在页签里打开（解析不解析看后缀，见 LearnWorkspace 的 openWsFile） */
+  onOpenWs: (rel: string) => void
+  /** 工作区的新建与改名（真实文件 / 目录，IO 在宿主那一头，见 WsActions） */
+  ws: WsActions
+  /** 打开一个本地文件（列表项点击、或从对话框挑回来） */
+  onOpenLocal: (path: string) => void
+  /** 从列表里移除（不动磁盘上的文件） */
+  onRemoveLocal: (path: string) => void
+  /** 在系统文件管理器里定位这个本地文件 */
+  onRevealLocal: (path: string) => void
+  /** 弹原生对话框挑本地文件 */
+  onPickLocal: () => void
+  /** 收藏区：打开一行（现场换算成页签，见 LearnWorkspace 的 openFavorite） */
+  onOpenFavorite: (ref: FavoriteRef) => void
+  /** 收藏区：把一行摘出收藏夹（不动文档本身） */
+  onRemoveFavorite: (ref: FavoriteRef) => void
+  /** 收藏分组（见 learn/favorites）：移入 / 组改名 / 删组 / 改收藏显示名 / 新建组 */
+  onSetFavoriteGroup: (ref: FavoriteRef, group: string | null) => void
+  onRenameFavoriteGroup: (from: string, to: string) => void
+  onRemoveFavoriteGroup: (group: string) => void
+  onRenameFavoriteTitle: (ref: FavoriteRef, title: string) => void
+  onCreateFavoriteGroup: (name: string) => void
+  /** 收藏行的标题（节点名 / 考试名要查数据，见 learn/favorites 的 favoriteTitle） */
+  favoriteTitleOf: (ref: FavoriteRef) => string
+  /** 节点下面那些文档的动作：新建、打开、改名、删除、定位 */
+  docs: NodeDocActions
+  /** 考试那一侧的动作（原先都在文档区悬浮组的「试卷」tip 里） */
+  exams: ExamActions
+  onOpenEssay?: () => void
+  onOpenSchedule?: () => void
+  onOpenSettings?: () => void
+  onOpenFind?: () => void
+  /** 学习状态那块 tip 要的东西（节点右键菜单里的二级 tip） */
+}
+
+function ExplorerSidebarComponent({
+  store,
+  activeNodeId,
+  activeTab,
+  busyNodeId,
+  open,
+  pure,
+  onClose,
+  onSelectNode,
+  onSelectGoal,
+  activeGoalId,
+  onNewGoal,
+  onDeleteNode,
+  onRevealNode,
+  onRevealWs,
+  onOpenWs,
+  ws,
+  videos,
+  onOpenVideo,
+  onDeleteVideo,
+  onNewVideo,
+  onOpenLocal,
+  onRemoveLocal,
+  onRevealLocal,
+  onPickLocal,
+  onOpenFavorite,
+  onRemoveFavorite,
+  onSetFavoriteGroup,
+  onRenameFavoriteGroup,
+  onRemoveFavoriteGroup,
+  onRenameFavoriteTitle,
+  onCreateFavoriteGroup,
+  favoriteTitleOf,
+  docs,
+  exams,
+  onOpenEssay: _onOpenEssay,
+  onOpenSchedule: _onOpenSchedule,
+  onOpenSettings,
+  onOpenFind: _onOpenFind,
+}: Props) {
+  const { isOpen, toggle } = useTreeExpand(store, activeNodeId)
+  const [menu, setMenu] = useState<MenuState | null>(null)
+  /**
+   * 正在就地改名的那份笔记。**状态放在侧栏这一层**：改名是从右键菜单里点的，
+   * 而菜单只有一份、挂在侧栏上——状态搁在某一行里，菜单就够不着它了。
+   */
+  const [renaming, setRenaming] = useState<{ nodeId: string; name: string } | null>(null)
+  const { width, resizing, asideRef, onWidthDown, onWidthMove, onWidthUp } = useSidebarWidth()
+  const [collapsedBar, setCollapsedBar] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('moji:explorer:collapsed') === 'true'
+    } catch {
+      return false
+    }
+  })
+
+  const toggleCollapsed = (next?: boolean) => {
+    setCollapsedBar((prev) => {
+      const val = next !== undefined ? next : !prev
+      try {
+        localStorage.setItem('moji:explorer:collapsed', val ? 'true' : 'false')
+      } catch {}
+      return val
+    })
+  }
+
+  const currentWidth = collapsedBar ? 48 : width
+
+  // 同一枚页签重复激活时，只唤醒侧栏自身，不让 LearnWorkspace 整树重渲染。
+  const browseNonce = useSyncExternalStore(subscribeRevealRequest, revealRequestVersion)
+
+  /** 两个分区各自的折叠状态；没记过的一律按展开（见文件头的说明） */
+  const [collapsed, setCollapsed] = useState<Map<string, boolean>>(new Map())
+  const sectionOpen = (key: string) => !collapsed.get(key)
+  const toggleSection = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Map(prev)
+      next.set(key, !prev.get(key))
+      return next
+    })
+
+  // 定位广播轮到分区这一层：目标所在的分区收着就打开（只开不收）。
+  // 分区 / 节点链 / 文档目录 / 试卷 / 收藏分组 / 工作区逐层，全是对同一条广播各就各位。
+  useEffect(
+    () =>
+      subscribeReveal((req) => {
+        const section = req.section
+        if (!section) return
+        setCollapsed((prev) => (prev.get(section) ? new Map(prev).set(section, false) : prev))
+      }),
+    [],
+  )
+
+  /*
+   * 工作区目录的**外部变化**：主进程按「展开着的目录」挂 watcher（清单由各层行登记，
+   * 见 explorer/wsChanges），目录里一有增删改名就推 ws:changed 回来——在这里摇一次
+   * wsChanged 的铃，挂载过的各层行各自重列。订阅一处、挂在这里：侧栏只有一份。
+   */
+  useEffect(() => {
+    try {
+      return native().ws.onChanged(() => notifyWsChanged())
+    } catch {
+      // 纯 Web 开发态没有主进程：这个功能整体缺席，不影响其它
+      return
+    }
+  }, [])
+
+  /*
+   * 页签定位的发令：焦点格开着的那一份，在资源管理器里把它亮出来。两个信号都会发——
+   * **页签换了**（关页签带出的邻位激活、聚焦另一格分屏，值变化当场就能看出来）与
+   * **拍号走了**（重开当前正开着的这份：值没变，但「开始浏览」值得再定位一次）。
+   * 纯净阅读时整栏不可见，不折腾。展开与滚动由广播的订阅者与 revealRow 自己完成——
+   * 这里只算出目标、喊出去（直接 setState 的 effect 是 lint 拦的写法）。
+   */
+  const lastSig = useRef('')
+  const lastNonce = useRef(-1)
+  useEffect(() => {
+    if (pure || !activeTab) return
+    const sig = revealSigOf(activeTab)
+    if (sig === lastSig.current && browseNonce === lastNonce.current) return
+    lastSig.current = sig
+    lastNonce.current = browseNonce
+    const req = revealOfTab(activeTab, store, userAbsPrefix())
+    if (!req) return
+    publishReveal(req)
+    revealRow(asideRef.current, req.keys)
+  }, [activeTab, pure, store, browseNonce, asideRef])
+
+  const roots = useMemo(() => {
+    return store.goals.map((g) => {
+      const root = g.rootNodeId ? nodeById(store, g.rootNodeId) : null
+      if (root) return root
+      const placeholder: KnowledgeNode = {
+        id: g.id,
+        title: g.title || g.question || t('未命名目标'),
+        key: normalizeKey(g.title || g.question || 'goal'),
+        description: '',
+        docs: { teaching: '' },
+        notes: [],
+        annotations: [],
+        status: 'learning',
+        origin: 'user',
+        goalId: g.id,
+        createdAt: g.createdAt,
+        updatedAt: g.updatedAt,
+      }
+      return placeholder
+    })
+  }, [store])
+  const locals = store.localFiles ?? []
+  const openMenu = (x: number, y: number, target: MenuTarget) => setMenu({ x, y, target })
+
+  return (
+    <>
+      {open && (
+        <div className="fixed inset-0 z-30 bg-mask/25 md:hidden" onClick={onClose} aria-hidden="true" />
+      )}
+      <aside
+        ref={asideRef}
+        /*
+         * 宽度写在这一层（内联），不用 w-72：它可拖、也记在设置里（见上面的宽度状态）。
+         *
+         * 纯净阅读（pure）时整栏往左让出去，让位靠的是**负外边距**而不是位移：
+         * translate 只挪画面，这一栏在布局里占的那几百像素还在（正文左边会空一条）；
+         * 把外边距收成 -width 才是真的让位，而宽度本身一点不动——里面的树、滚动位置
+         * 全都原样待着，滑出去的只是整块。等宽过渡与右侧那一栏同一档（300ms）。
+         */
+        style={{ width: currentWidth, marginLeft: pure ? -currentWidth : 0 }}
+        // md:relative（而不是 md:static）：右边那条宽度把手是绝对定位的，得有个定位祖先；
+        // relative 与 static 在流里的占位完全一样，桌面上看不出区别。
+        // 过渡属性按断点分开：窄屏下这一栏是抽屉（滑 transform，200ms），
+        // 桌面上它靠外边距让位（300ms，与右侧栏对齐）——两者不会同时发生。
+        className={'no-print fixed inset-y-0 left-0 z-40 flex shrink-0 flex-col border-r border-line bg-paper-deep transition-all duration-300 ease-out md:relative md:translate-x-0 overflow-hidden ' +
+          (pure || open ? 'translate-x-0' : '-translate-x-full') +
+          // 让位之后别再留在 Tab 序列里：滑出窗口只是看不见，里面那棵树、那些按钮
+          // 照样能被 Tab 找到（与两列收起时那条 lg:invisible 同一个道理）
+          (pure ? ' invisible' : '')}
+      >
+{collapsedBar ? (
+          /* 折叠态：48px 窄侧栏，顶部 Logo，底部设置齿轮与展开按钮 */
+          <div className="flex flex-col items-center h-full w-full py-3 select-none">
+            {/* 顶部 Logo：点击展开 */}
+            <button
+              type="button"
+              onClick={() => toggleCollapsed(false)}
+              title={t('展开资源管理器')}
+              className="flex h-8 w-8 items-center justify-center rounded-none mb-3 hover:scale-105 transition-transform"
+            >
+              <Logo size={26} />
+            </button>
+
+            {/* 弹性占位 */}
+            <div className="flex-1 min-h-4" />
+
+            {/* 底部设置齿轮 */}
+            <button
+              type="button"
+              onClick={() => onOpenSettings?.()}
+              title={t('设置')}
+              className="flex h-8 w-8 items-center justify-center text-ink-soft hover:text-ink hover:bg-card/70 rounded-none transition my-0.5"
+            >
+              <Settings size={16} />
+            </button>
+
+            {/* 展开按钮 */}
+            <button
+              type="button"
+              onClick={() => toggleCollapsed(false)}
+              title={t('展开侧栏')}
+              className="flex h-8 w-8 items-center justify-center text-ink-soft hover:text-seal hover:bg-card/70 rounded-none transition mt-1"
+            >
+              <PanelLeftOpen size={16} />
+            </button>
+          </div>
+        ) : (
+          /* 展开态：完整的资源管理器结构 */
+          <>
+            <header className="flex items-center gap-2 px-3 pb-2.5 pt-3.5 border-b border-line/40">
+              <button
+                type="button"
+                onClick={() => toggleCollapsed(true)}
+                title={t('收起侧栏')}
+                className="flex items-center justify-center cursor-pointer hover:opacity-80 active:scale-95 transition-all outline-none rounded-none"
+              >
+                <Logo size={30} />
+              </button>
+              <div className="min-w-0 flex-1 leading-tight">
+                <div className="text-[14px] font-semibold text-ink-strong">{t('归一')}</div>
+                <div className="text-[8.5px] uppercase tracking-[0.2em] text-ink-faint">Retro Learning</div>
+              </div>
+              {/* 收起侧栏按钮 */}
+              <button
+                type="button"
+                onClick={() => toggleCollapsed(true)}
+                title={t('收起侧栏')}
+                className="flex h-6 w-6 items-center justify-center text-ink-soft hover:text-ink hover:bg-card/60 rounded-none transition"
+              >
+                <PanelLeftClose size={14} />
+              </button>
+            </header>
+
+        <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+          <Section
+            title={t('学习目标')}
+            count={store.nodes.length}
+            open={sectionOpen('nodes')}
+            onToggle={() => toggleSection('nodes')}
+            action={
+              <SectionAction title={t('新建学习目标')} onClick={onNewGoal} always large>
+                <NewGoalIcon size={16} />
+              </SectionAction>
+            }
+          >
+            <div className="px-2">
+              {roots.map((root) => (
+                <NodeRow
+                  key={root.id}
+                  node={root}
+                  store={store}
+                  isRoot
+                  isOpen={isOpen}
+                  onToggle={toggle}
+                  activeNodeId={activeNodeId}
+                  activeTab={activeTab}
+                  activeGoalId={activeGoalId}
+                  busyNodeId={busyNodeId}
+                  onSelectNode={onSelectNode}
+                  onSelectGoal={onSelectGoal}
+                  onOpenMenu={openMenu}
+                  docs={docs}
+                  exams={exams}
+                  renamingNote={renaming && renaming.nodeId === root.id ? renaming.name : null}
+                  onEndRename={() => setRenaming(null)}
+                  onOpenWs={onOpenWs}
+                  ws={ws}
+                />
+              ))}
+              {roots.length === 0 && (
+                <div className="px-3 py-8 text-center text-[13px] leading-relaxed text-ink-faint">
+                  {t('还没有学习记录')}
+                  <br />
+                  {t('从一个目标开始吧')}
+                </div>
+              )}
+            </div>
+          </Section>
+
+          {/* 收藏：树与本地文件之间。收藏的东西多种多样（文档 / 网页 / 文件），
+              放在「我有什么」的两区之间才找得到；空列表整块不显示 */}
+          <FavoriteSection
+            items={store.favorites ?? []}
+            groups={store.favGroups ?? []}
+            open={sectionOpen('favorites')}
+            onToggle={() => toggleSection('favorites')}
+            titleOf={favoriteTitleOf}
+            onOpen={onOpenFavorite}
+            onRemove={onRemoveFavorite}
+            onSetGroup={onSetFavoriteGroup}
+            onRenameGroup={onRenameFavoriteGroup}
+            onRemoveGroup={onRemoveFavoriteGroup}
+            onRenameTitle={onRenameFavoriteTitle}
+            onCreateGroup={onCreateFavoriteGroup}
+          />
+
+          {/* 视频（用户创建的「绑定住的来源」）：分区**常显不隐藏**（用户定的），
+              新建入口就在分区头的「＋」上；播放器控件栏里那颗是选集列表开关，两者别混。 */}
+          <Section
+            title={t('视频')}
+            count={videos.length}
+            open={sectionOpen('videos')}
+            onToggle={() => toggleSection('videos')}
+            action={
+              <SectionAction title={t('新建视频')} onClick={onNewVideo}>
+                <Plus size={13} />
+              </SectionAction>
+            }
+          >
+            <div className="px-2">
+              {videos.length ? (
+                videos.map((v) => (
+                  <VideoRow
+                    key={v.id}
+                    video={v}
+                    onOpen={() => onOpenVideo(v.id)}
+                    onDelete={() => onDeleteVideo(v.id)}
+                  />
+                ))
+              ) : (
+                <p className="px-1.5 py-1 text-[11px] leading-relaxed text-ink-faint">
+                  {t('还没有视频：点右上角的「＋」新建一个。')}
+                </p>
+              )}
+            </div>
+          </Section>
+
+          {locals.length > 0 && (
+            <Section
+              title={t('本地文件')}
+              count={locals.length}
+              open={sectionOpen('local')}
+              onToggle={() => toggleSection('local')}
+              action={
+                <SectionAction title={t('打开本地文件')} onClick={onPickLocal}>
+                  <OpenLocalIcon size={13} />
+                </SectionAction>
+              }
+            >
+              <div className="px-2">
+                {locals.map((f) => (
+                  <LocalRow
+                    key={f.path}
+                    file={f}
+                    onOpen={() => onOpenLocal(f.path)}
+                    onMenu={(x, y) => openMenu(x, y, { kind: 'local', file: f })}
+                  />
+                ))}
+              </div>
+            </Section>
+          )}
+
+        </div>
+
+        {/* 系统音频柱形频谱：挂在侧栏底端当一台小电台（采集见 src/lib/audio/loopback）。
+            满宽、不加上边框——树区滚到底已有留白，再画一条线就把这块小电台框死了；
+            柱子从底边往上长，接不上系统音频时只剩一排底座，原因在悬停提示里 */}
+        {!isWeb() && (
+          <div className="px-2 py-2.5">
+            <SystemAudioWave />
+          </div>
+        )}
+          </>
+        )}
+
+        {/*
+          右边线上的宽度把手：命中区 8px（一像素的线抓不住），骑在那条 border-r 上。
+          md 以上才有意义——窄屏下这一栏是盖在内容上的抽屉，宽度由屏幕说了算。
+        */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t('拖动调整资源管理器宽度（{0}~{1} px）', EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX)}
+          title={t('拖动调整宽度（{0}~{1} px）', EXPLORER_WIDTH_MIN, EXPLORER_WIDTH_MAX)}
+          onPointerDown={onWidthDown}
+          onPointerMove={onWidthMove}
+          onPointerUp={onWidthUp}
+          onPointerCancel={onWidthUp}
+          className={
+            'no-print absolute inset-y-0 right-0 z-10 hidden w-2 translate-x-1/2 cursor-col-resize touch-none md:block ' +
+            (resizing ? 'bg-seal/40' : '') + (collapsedBar ? ' !hidden' : '')
+          }
+        />
+      </aside>
+
+      {menu && (
+        <RowMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onRevealNode={onRevealNode}
+          onRevealWs={onRevealWs}
+          ws={ws}
+          onDeleteNode={onDeleteNode}
+          onRemoveLocal={onRemoveLocal}
+          onRevealLocal={onRevealLocal}
+          onStartRename={(nodeId, name) => setRenaming({ nodeId, name })}
+          docs={docs}
+          exams={exams}
+        />
+      )}
+    </>
+  )
+}
+
+export default memo(ExplorerSidebarComponent)

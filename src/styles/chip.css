@@ -1,0 +1,45 @@
+/*
+ * 引用 chip（#[{…}] 渲染出来的那枚元素）的样式。输入框、消息列表、拖放插入共用这一份。
+ */
+
+.moji-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 300px;
+  padding: 0 6px;
+  border-radius: 6px;
+  border: 1px solid var(--color-line-strong);
+  background: var(--color-card);
+  color: var(--color-ink-soft);
+  font-size: 12px;
+  line-height: 20px;
+  /*
+   * 垂直对齐：inline-flex 的基线取的是**第一个 flex 项**的基线，而这里第一项是图标
+   * （没有基线的替换元素）——它的基线就是自己的下边缘。于是整枚 chip 拿「图标底边」
+   * 去对文字基线，看起来比周围文字高一截（Chromium 实测：12px 字号下高 2.5px）。
+   * 这 -2.5px 把它补回来：胶囊里的文字正好落在正文基线上，框也跟着在文字两侧居中。
+   * 用绝对长度而不是 em——这 2.5px 来自图标与内边距那一套固定几何，与外层字号无关
+   * （13.5px 的聊天气泡与 15px 的正文里实测都是 2.5px，见 scripts 里的量法）。
+   */
+  vertical-align: -2.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.moji-chip:hover {
+  border-color: var(--color-seal, #4a8fd4);
+  background: var(--color-paper-deep);
+}
+
+/* 名字超长时从右边截：认一份东西靠的是开头那几个字（与页签标题同一条规矩） */
+.moji-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.moji-chip svg {
+  flex-shrink: 0;
+}

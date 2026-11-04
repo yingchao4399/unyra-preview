@@ -1,0 +1,62 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-electron
+dist-server
+dist-ssr
+
+# 打包产物（npm run release:win）
+release
+release-*/
+# 例外：release-notes/ 要进版本库（上面的 release-*/ 会连带匹配到它）
+!release-notes/
+# 授权签发器的构建产物（npm run licgen:gui）
+dist-licgen
+# 签发器的免安装单 exe（npm run licgen:exe）——卖家自用，不进版本库、不发布
+release-licgen
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI 助手本地工作目录
+.zcode/
+
+# 授权签发器的打包配置——只给卖家自用，绝不进公开仓库
+electron-builder.licgen.yml
+coverage/
+
+# 图标工具集的临时依赖（npm run icons 现下的 resvg/vips wasm，约 8 MB）
+build/.icon-toolset/
+
+# DSH 沙箱 ACL 修复时留下的诊断报告——本机排障产物，与项目无关
+.dsh-acl-recovery/
+
+# 性能实验台的构建产物（npm run perf:lab 生成的单文件 HTML；shell.html 是模板源码，要进库）
+perf-lab/tab-switch-lab*.html
+
+# workbuddy 助手的本机记忆目录（会话产物，与项目无关）
+.workbuddy/
+.workbuddy-ai/
+
+# 公告编辑器的本地草稿（公告正文不该进版本库；工具本身在 tools/notice-studio/）
+tools/notice-studio/draft.json
+
+# 根目录 plugins/：本地自测用的插件文件，仅开发时手动装，不进版本库也不随包分发
+plugins/

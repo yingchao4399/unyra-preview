@@ -1,0 +1,802 @@
+/**
+ * 统一的 Chat 客户端：所有提供商共用一套请求、错误翻译与取消语义。
+ *
+ * 协议按 OpenAI 兼容格式实现：
+ * - POST {baseUrl}/chat/completions（stream: true 走 SSE）
+ * - GET  {baseUrl}/models
+ * - Authorization: Bearer <apiKey>
+ *
+ * 每家服务的差异收敛到 ResolvedProvider 的 quirks 里（见 ai/providers），
+ * 因此这里没有一句 if (provider === 'xxx')。新增提供商只改 providers.ts。
+ */
+
+import { endpoint, isGoPlanModel } from './providers'
+import { toOpenAiContent } from './content'
+import { commandCodeStream } from './commandcode'
+import { anthropicStream } from './anthropic'
+import { responsesStream } from './responses'
+import { httpFetch } from './http'
+import {
+  AiRequestError,
+  cacheHitRate,
+  estimateUsage,
+  type ChatMessage,
+  type ChatToolDef,
+  type ChatToolCall,
+  type ChatUsage,
+  type EffortMap,
+  type ProviderProtocol,
+  type ReasoningEffort,
+  type StreamChatResult,
+  type StreamChatOptions,
+  type UsagePurpose,
+} from './types'
+import type { ProviderQuirks } from './providers'
+import { recordUsage } from './usageLog'
+import { num } from '../lib/num'
+import { t } from '../i18n'
+
+export { AiRequestError } from './types'
+export type {
+  ChatMessage,
+  ChatToolDef,
+  ChatToolCall,
+  StreamChatResult,
+  StreamChatOptions,
+  StreamFn,
+} from './types'
+
+/** 一次调用所需的全部提供商信息（已解析、可直接发请求） */
+export interface ResolvedProvider {
+  id: string
+  /** 显示名，仅用于错误提示的措辞 */
+  label: string
+  /** API 根地址（不含具体端点路径） */
+  baseUrl: string
+  apiKey: string
+  /** 额外请求头（部分网关要求 App 标识、版本号等） */
+  extraHeaders?: Record<string, string>
+  quirks?: ProviderQuirks
+  /**
+   * 中立思考档 → 线值（见 EffortMap）。已按「模型 → 提供商 → 预设」合成完毕
+   * （见 ai/settings 的 resolveProvider），缺档回落各协议模块里的默认映射。
+   */
+  effortMap?: EffortMap
+  /** 线上协议；省略按 'openai' 处理 */
+  protocol?: ProviderProtocol
+  /** 模型目录端点路径；省略按 '/models' 处理 */
+  modelsPath?: string
+  /** 该提供商的单轮输出上限；省略用调用方的默认值 */
+  maxTokens?: number
+  /** 拉取目录时是否按 Command Code Go 套餐筛选 */
+  goPlanOnly?: boolean
+  /** 用户填的 API 版本（预设声明了该字段时才有值） */
+  apiVersion?: string
+}
+
+/** 把 HTTP 状态码与响应体翻译成用户能看懂的提示，其余原样抛出 */
+function toMessage(label: string, status: number, body: string): string {
+  if (status === 401 || status === 403) return t('API Key 无效或没有访问权限')
+  if (status === 402) return t('账户余额不足')
+  if (status === 404) return t('接口地址或模型名不存在，请检查提供商设置')
+  if (status === 413) return t('请求内容过长，超出模型上下文上限')
+  if (status === 422) return t('请求参数错误')
+  if (status === 429) return t('请求过于频繁或额度已用尽，请稍后再试')
+  if (status === 500 || status === 502 || status === 503 || status === 504)
+    return t('{0} 服务暂时不可用', label)
+  try {
+    const msg = (JSON.parse(body) as { error?: { message?: string } }).error?.message
+    if (msg) return t('请求失败：{0}', msg)
+  } catch {
+    // 非 JSON 响应体，走默认提示
+  }
+  return t('请求失败（HTTP {0}）', status)
+}
+
+/**
+ * 把 OpenAI 兼容的 usage 帧翻译成统一的 ChatUsage。
+ *
+ * 命中缓存的字段各家写法不同，这里一次收齐：
+ * - OpenAI / 多数中转：prompt_tokens_details.cached_tokens
+ * - DeepSeek：prompt_cache_hit_tokens
+ * - 另有个别网关自己起名，取不到就按 0（显示成没命中，不影响输入输出总数）。
+ */
+function translateUsage(raw: Record<string, unknown>): ChatUsage {
+  const details = (raw.prompt_tokens_details ?? {}) as Record<string, unknown>
+  return {
+    input: num(raw.prompt_tokens) || num(raw.input_tokens),
+    output: num(raw.completion_tokens) || num(raw.output_tokens),
+    // 命中缓存的字段各家写法不同，这里一次收齐：
+    // - OpenAI / 多数中转：prompt_tokens_details.cached_tokens
+    // - DeepSeek：prompt_cache_hit_tokens
+    // - Anthropic 线格式的字段出现在 OpenAI 兼容端点上（个别网关混着报）：cache_read_input_tokens
+    cacheRead:
+      num(details.cached_tokens) ||
+      num(raw.prompt_cache_hit_tokens) ||
+      num(raw.cache_read_input_tokens),
+    cacheWrite: num(details.cache_creation_tokens) || num(raw.cache_creation_input_tokens),
+  }
+}
+
+/** 请求头：鉴权 + 额外头；Key 为空时不发 Authorization（本地模型常常不需要） */
+function headersFor(p: ResolvedProvider): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...p.extraHeaders,
+  }
+  const key = p.apiKey.trim()
+  if (key) {
+    if (p.protocol === 'anthropic') {
+      headers['x-api-key'] = key
+      headers['anthropic-version'] = p.apiVersion || '2023-06-01'
+    } else {
+      headers.Authorization = `Bearer ${key}`
+    }
+  }
+  return headers
+}
+
+/**
+ * 把用户的 baseUrl 规范化成根地址。
+ * 允许用户直接粘贴完整的 …/chat/completions（很常见），这里去掉该后缀，
+ * 避免拼成 …/chat/completions/chat/completions。
+ */
+function rootOf(baseUrl: string): string {
+  return baseUrl.trim().replace(/\/+$/, '').replace(/\/chat\/completions$/, '')
+}
+
+/** 组装请求体：把 quirks 翻译成对应字段，未声明的差异一律按标准字段处理 */
+export function bodyFor(
+  p: ResolvedProvider,
+  opts: {
+    model: string
+    messages: ChatMessage[]
+    stream: boolean
+    tools?: ChatToolDef[]
+    temperature?: number
+    maxTokens?: number
+    reasoningEffort?: ReasoningEffort
+    json?: boolean
+  },
+): Record<string, unknown> {
+  const isNone = opts.reasoningEffort === 'none'
+  let targetModel = opts.model
+  if (isNone && targetModel.toLowerCase() === 'deepseek-reasoner') {
+    // DeepSeek 官方 API 的 deepseek-reasoner 端点强制开启推理，不可关闭思考；
+    // 非思考模式下自动对齐到官方非思考模型 deepseek-chat，以实现极速直接回答。
+    targetModel = 'deepseek-chat'
+  }
+
+  const tokenParam = p.quirks?.tokenParam ?? 'max_tokens'
+  const modelLower = targetModel.toLowerCase()
+  const baseLower = p.baseUrl.toLowerCase()
+  const idLower = p.id.toLowerCase()
+
+  const style = p.quirks?.thinkingStyle
+  let useThinkingType = style === 'thinking_type' || !!p.quirks?.thinkingTypeParam
+  let useEnableThinking = style === 'enable_thinking' || !!p.quirks?.enableThinkingParam
+  let useThinkingConfig = style === 'thinking_config' || !!p.quirks?.thinkingConfigParam
+  let useOllamaThink =
+    style === 'think' ||
+    !!p.quirks?.thinkParam ||
+    idLower === 'ollama' ||
+    baseLower.includes(':11434') ||
+    baseLower.includes('ollama')
+  let useOpenRouter = idLower === 'openrouter' || baseLower.includes('openrouter.ai')
+
+  // 未显式配置 quirks 时的智能推断兜底（防御用户自建提供商或未带 quirks 的历史配置）
+  if (!style && !useThinkingType && !useEnableThinking && !useThinkingConfig && !useOllamaThink && !useOpenRouter) {
+    if (idLower === 'deepseek' || baseLower.includes('deepseek') || modelLower.includes('deepseek')) {
+      useThinkingType = true
+    } else if (
+      idLower === 'dashscope' ||
+      idLower === 'siliconflow' ||
+      idLower === 'volcengine' ||
+      baseLower.includes('dashscope') ||
+      baseLower.includes('siliconflow') ||
+      baseLower.includes('volces') ||
+      baseLower.includes('aliyun') ||
+      modelLower.includes('qwen') ||
+      modelLower.includes('qwq')
+    ) {
+      useEnableThinking = true
+    } else if (
+      idLower === 'gemini' ||
+      baseLower.includes('generativelanguage.googleapis.com') ||
+      modelLower.includes('gemini')
+    ) {
+      useThinkingConfig = true
+    }
+  }
+
+  const isStrictOpenAi =
+    (idLower === 'openai' || baseLower.includes('api.openai.com') || style === 'reasoning_effort') &&
+    !modelLower.includes('deepseek')
+
+  const isThinkingModelOrActive =
+    !isNone &&
+    (useThinkingType ||
+      idLower === 'deepseek' ||
+      idLower === 'zhipu' ||
+      baseLower.includes('deepseek') ||
+      baseLower.includes('bigmodel') ||
+      modelLower.includes('deepseek') ||
+      modelLower.includes('reasoner') ||
+      modelLower.includes('glm-4') ||
+      modelLower.includes('qwq'))
+
+  const body: Record<string, unknown> = {
+    model: targetModel,
+    /**
+     * 内容在这里翻译成 OpenAI 的线格式：纯文本仍是字符串（兼容性最好），
+     * 只有带图的消息才变成 [text, image_url] 数组（见 ai/content）。
+     * 中立形态只存在于历史里——换提供商不必改写历史，前缀缓存因此不受影响。
+     */
+    messages: opts.messages.map((m) => {
+      const msg: Record<string, unknown> = {
+        role: m.role,
+        content: toOpenAiContent(m.content),
+      }
+      if (m.role === 'assistant') {
+        if (isThinkingModelOrActive) {
+          // DeepSeek 等思考模型协议规范：
+          // 在思考模式下，所有 assistant 消息回传必须携带 reasoning_content 字段；
+          // 哪怕本跳没有产生思考（或为注入/人格/格式声明等合成消息），也必须回传空字符串 ""，
+          // 缺了该字段直接引发 HTTP 400（The 'reasoning_content' in the thinking mode must be passed back to the API）。
+          msg.reasoning_content = m.reasoning_content ?? ''
+        } else if (!isStrictOpenAi && m.reasoning_content !== undefined) {
+          msg.reasoning_content = m.reasoning_content
+        }
+      }
+      if (m.tool_calls) msg.tool_calls = m.tool_calls
+      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id
+      return msg
+    }),
+    stream: opts.stream,
+  }
+  // 不传 maxTokens 就不发该字段：把单轮输出长度交给服务端默认值。
+  // 之前固定发 128K，反而容易被我们这边的上限先截断。
+  if (opts.maxTokens !== undefined) body[tokenParam] = opts.maxTokens
+  if (opts.temperature !== undefined && !p.quirks?.omitTemperature) {
+    body.temperature = opts.temperature
+  }
+  // 思考等级处理：各家平台线格式各异（DeepSeek thinking.type / 阿里百炼 enable_thinking /
+  // 硅基流动 / Gemini thinking_config / Ollama think / OpenAI reasoning_effort / OpenRouter reasoning）。
+  // 优先遵循已配置的 quirks；若未显式指定，根据 baseUrl、提供商 id 与模型名做智能自适应推断。
+  if (opts.reasoningEffort !== undefined) {
+
+    // 1. DeepSeek 官方风格：thinking: { type: 'disabled' | 'enabled' }
+    // 官方规范：禁用思考时只发 thinking.type='disabled'，严禁同时发 reasoning_effort（否则 400）；
+    // 开启思考时发送 thinking.type='enabled'，并可由 reasoning_effort 携带 low/high/max。
+    if (useThinkingType) {
+      body.thinking = { type: isNone ? 'disabled' : 'enabled' }
+      if (!isNone && !p.quirks?.omitReasoningEffort) {
+        const wired = p.effortMap?.[opts.reasoningEffort]
+        if (wired && wired !== 'omit') {
+          body.reasoning_effort = wired
+        } else {
+          body.reasoning_effort = opts.reasoningEffort === 'max' ? 'high' : opts.reasoningEffort
+        }
+      }
+    }
+
+    // 2. 阿里云百炼 / 硅基流动 / 火山方舟风格：enable_thinking: false | true
+    if (useEnableThinking) {
+      body.enable_thinking = !isNone
+    }
+
+    // 3. Google Gemini 风格：thinking_config.thinking_budget = 0
+    if (useThinkingConfig && isNone) {
+      body.thinking_config = { thinking_budget: 0 }
+    }
+
+    // 4. Ollama 风格：think: false | true
+    if (useOllamaThink) {
+      body.think = !isNone
+    }
+
+    // 5. OpenRouter 风格：reasoning: { effort: 'none', enabled: false }
+    if (useOpenRouter) {
+      if (isNone) {
+        body.reasoning = { effort: 'none', enabled: false }
+        body.reasoning_effort = 'none'
+      } else {
+        const effortVal =
+          p.effortMap?.[opts.reasoningEffort] ?? (opts.reasoningEffort === 'max' ? 'high' : opts.reasoningEffort)
+        if (effortVal !== 'omit') {
+          body.reasoning = { effort: effortVal }
+          body.reasoning_effort = effortVal
+        }
+      }
+    }
+
+    // 6. OpenAI 标准 reasoning_effort（当没有使用上述专有参数时）
+    if (
+      !p.quirks?.omitReasoningEffort &&
+      !useThinkingType &&
+      !useEnableThinking &&
+      !useThinkingConfig &&
+      !useOllamaThink &&
+      !useOpenRouter
+    ) {
+      const wired = p.effortMap?.[opts.reasoningEffort]
+      if (isNone) {
+        if (wired && wired !== 'omit') {
+          body.reasoning_effort = wired
+        } else if (!wired) {
+          body.reasoning_effort = 'none'
+        }
+      } else {
+        if (wired !== 'omit') {
+          body.reasoning_effort = wired || (opts.reasoningEffort === 'max' ? 'high' : opts.reasoningEffort)
+        }
+      }
+    }
+  }
+  /**
+   * 要用量数据就得显式声明 include_usage（OpenAI 兼容协议的约定）：
+   * 不声明的话流里不会有 usage 帧，界面上的 token 与命中率就只能靠估算。
+   * 少数兼容实现不认这个字段，为此留了 omitStreamUsage 的开关。
+   */
+  if (opts.stream && !p.quirks?.omitStreamUsage) {
+    body.stream_options = { include_usage: true }
+  }
+  if (opts.json) body.response_format = { type: 'json_object' }
+  if (opts.tools?.length) {
+    body.tools = opts.tools
+    body.tool_choice = 'auto'
+  }
+  return body
+}
+
+/**
+ * 一次请求的用量摘要，打到控制台（开发时核对缓存命中率用）。
+ *
+ * 命中率的口径与界面上的一致（见 cacheHitRate）：cacheRead / input。
+ * 服务端没回报 usage（或只有本地估算）时打不出命中率，就明说，不假装是 0%——
+ * 「没数据」与「全没命中」是两回事。
+ */
+function logUsageLine(
+  provider: ResolvedProvider,
+  model: string,
+  usage: ChatUsage | undefined,
+  ms: number,
+): void {
+  const head = `[AI] ${provider.label} · ${model}`
+  const secs = (ms / 1000).toFixed(1) + 's'
+  if (!usage || usage.estimated) {
+    console.log(`${head} · 服务端未回报用量，命中率未知 · ${secs}`)
+    return
+  }
+  const rate = cacheHitRate(usage)
+  const pct = rate === null ? '—' : (rate * 100).toFixed(1) + '%'
+  const tok = (n: number): string => n.toLocaleString('en-US')
+  console.log(
+    `${head} · 缓存命中 ${pct}（${tok(usage.cacheRead)} / ${tok(usage.input)} tok）` +
+      (usage.cacheWrite > 0 ? ` · 写缓存 ${tok(usage.cacheWrite)} tok` : '') +
+      ` · 输出 ${tok(usage.output)} tok · ${secs}`,
+  )
+}
+
+/**
+ * 把一次完成的请求记进用量台账（见 ai/usageLog）：设置里的「用量」页就吃这份账。
+ * 服务端没回报用量时记本地估算（带 estimated 标记）——请求数与耗时仍然是真的。
+ */
+function recordRequest(
+  provider: ResolvedProvider,
+  model: string,
+  purpose: UsagePurpose | undefined,
+  usage: ChatUsage,
+  ms: number,
+): void {
+  recordUsage({
+    providerId: provider.id,
+    provider: provider.label,
+    model,
+    purpose: purpose ?? 'other',
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    ...(usage.estimated ? { estimated: true } : {}),
+    ms,
+  })
+}
+
+/**
+ * 流式 Chat 补全，支持 function calling，供 AI Agent 使用。
+ * 通过 onDelta 增量抛出正文与思维链，返回累积后的完整结果。
+ *
+ * 按协议分派：OpenAI 兼容走 SSE，Command Code 走私有网关的 NDJSON。
+ * 两者的实现互不干扰，调用方只看到统一的返回值。
+ *
+ * 每次请求成功返回后做两件事：把缓存命中率打到控制台（见 logUsageLine），并把
+ * 这一条请求记进用量台账（见 recordRequest）——前缀缓存是否真的生效，只能拿
+ * 逐请求的数字对着看；长期花销则看台账。
+ */
+export async function streamChatWith(
+  provider: ResolvedProvider,
+  model: string,
+  opts: StreamChatOptions,
+): Promise<StreamChatResult> {
+  const dispatch = (): Promise<StreamChatResult> => {
+    switch (provider.protocol) {
+      case 'commandcode':
+        return commandCodeStream(provider, model, opts)
+      case 'anthropic':
+        return anthropicStream(provider, model, opts)
+      case 'responses':
+        return responsesStream(provider, model, opts)
+      default:
+        return openAiStream(provider, model, opts)
+    }
+  }
+  const startedAt = Date.now()
+  const result = await dispatch()
+  const ms = Date.now() - startedAt
+  logUsageLine(provider, model, result.usage, ms)
+  // 服务端没回报用量就按字符估算（界面上同一条路）：请求数与耗时不能因此缺账
+  recordRequest(provider, model, opts.purpose, result.usage ?? estimateUsage(opts.messages, opts.tools, result.content), ms)
+  return result
+}
+
+async function openAiStream(
+  provider: ResolvedProvider,
+  model: string,
+  opts: StreamChatOptions,
+): Promise<StreamChatResult> {
+  const url = endpoint(rootOf(provider.baseUrl), '/chat/completions')
+  let res: Response
+  try {
+    // 经主进程转发（llm-proxy://），绕开浏览器跨域限制
+    res = await httpFetch(url, {
+      method: 'POST',
+      headers: { ...headersFor(provider), Accept: 'text/event-stream' },
+      body: JSON.stringify(bodyFor(provider, { ...opts, model, stream: true })),
+      signal: opts.signal,
+    })
+  } catch (err) {
+    if (opts.signal?.aborted) throw err
+    throw new AiRequestError(t('网络请求失败，请检查网络连接'))
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new AiRequestError(toMessage(provider.label, res.status, body), res.status)
+  }
+  if (!res.body) throw new AiRequestError(t('服务未返回数据流'))
+
+  // SSE 空闲超时：连接中途断开时 reader.read() 可能一直挂着不返回，
+  // 而不是抛错；旧代码会因此永远卡在「思考中」。这里给每个数据块设上限，
+  // 超时就取消并报错，把「异常终止」变成用户能看到的明确失败。
+  const IDLE_TIMEOUT_MS = 90_000
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let reasoning = ''
+  let fallbackContent = ''
+  let inThinkBlock = false
+  let tagBuffer = ''
+  let finishReason: string | null = null
+  const toolCalls = new Map<number, ChatToolCall>()
+  /** 用量的原始帧：字段名各家不一，收完再统一翻译 */
+  let usageFrame: Record<string, unknown> | null = null
+  const onAbort = () => void reader.cancel().catch(() => {})
+  opts.signal?.addEventListener('abort', onAbort, { once: true })
+  let idle: ReturnType<typeof setTimeout> | null = null
+
+  const processContentDelta = (text: string) => {
+    let raw = tagBuffer + text
+    tagBuffer = ''
+
+    while (raw.length > 0) {
+      if (inThinkBlock) {
+        const endIdx = raw.indexOf('</think>')
+        if (endIdx !== -1) {
+          const thinkText = raw.slice(0, endIdx)
+          if (opts.reasoningEffort !== 'none' && thinkText) {
+            reasoning += thinkText
+            opts.onDelta?.({ reasoning: thinkText })
+          }
+          inThinkBlock = false
+          raw = raw.slice(endIdx + 8)
+        } else {
+          const lastOpen = raw.lastIndexOf('<')
+          if (lastOpen !== -1 && '</think>'.startsWith(raw.slice(lastOpen))) {
+            const thinkText = raw.slice(0, lastOpen)
+            if (opts.reasoningEffort !== 'none' && thinkText) {
+              reasoning += thinkText
+              opts.onDelta?.({ reasoning: thinkText })
+            }
+            tagBuffer = raw.slice(lastOpen)
+            break
+          } else {
+            if (opts.reasoningEffort !== 'none') {
+              reasoning += raw
+              opts.onDelta?.({ reasoning: raw })
+            }
+            break
+          }
+        }
+      } else {
+        const startIdx = raw.indexOf('<think>')
+        if (startIdx !== -1) {
+          const before = raw.slice(0, startIdx)
+          if (before) {
+            content += before
+            opts.onDelta?.({ content: before })
+          }
+          inThinkBlock = true
+          raw = raw.slice(startIdx + 7)
+        } else {
+          const lastOpen = raw.lastIndexOf('<')
+          if (lastOpen !== -1 && '<think>'.startsWith(raw.slice(lastOpen))) {
+            const before = raw.slice(0, lastOpen)
+            if (before) {
+              content += before
+              opts.onDelta?.({ content: before })
+            }
+            tagBuffer = raw.slice(lastOpen)
+            break
+          } else {
+            content += raw
+            opts.onDelta?.({ content: raw })
+            break
+          }
+        }
+      }
+    }
+  }
+
+  const handleLine = (line: string) => {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('data:')) return
+    const data = trimmed.slice(5).trim()
+    if (!data || data === '[DONE]') return
+    let json: {
+      choices?: Array<{
+        delta?: {
+          content?: string
+          /** DeepSeek / 硅基流动 / 智谱等 */
+          reasoning_content?: string
+          /** OpenRouter 等网关 */
+          reasoning?: string
+          tool_calls?: Array<{
+            index?: number
+            id?: string
+            function?: { name?: string; arguments?: string }
+          }>
+        }
+        finish_reason?: string | null
+      }>
+      /** include_usage 声明的用量帧（另有一家把它塞在 choices 里） */
+      usage?: Record<string, unknown>
+    }
+    try {
+      json = JSON.parse(data)
+    } catch {
+      return
+    }
+    if (json.usage) usageFrame = json.usage
+    const choice = json.choices?.[0]
+    if (!choice) return
+    const delta = choice.delta ?? {}
+    // 思维链字段各家命名不一（reasoning_content / reasoning）；
+    // 严格尊重用户思考等级：当明确为 none（非思考模式）时，绝不抛出 reasoning 事件
+    const thinking = delta.reasoning_content ?? delta.reasoning
+    if (thinking) {
+      if (opts.reasoningEffort !== 'none') {
+        reasoning += thinking
+        opts.onDelta?.({ reasoning: thinking })
+      } else {
+        fallbackContent += thinking
+      }
+    }
+    if (delta.content) {
+      processContentDelta(delta.content)
+    }
+    for (const tc of delta.tool_calls ?? []) {
+      const idx = tc.index ?? 0
+      const cur = toolCalls.get(idx) ?? { id: '', name: '', arguments: '' }
+      if (tc.id) cur.id = tc.id
+      if (tc.function?.name) cur.name += tc.function.name
+      if (tc.function?.arguments) cur.arguments += tc.function.arguments
+      toolCalls.set(idx, cur)
+    }
+    if (choice.finish_reason) finishReason = choice.finish_reason
+  }
+
+  try {
+    for (;;) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          idle = setTimeout(() => reject(new AiRequestError(t('响应超时，连接可能已中断'))), IDLE_TIMEOUT_MS)
+        }),
+      ])
+      if (idle) {
+        clearTimeout(idle)
+        idle = null
+      }
+      const { done, value } = chunk
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) handleLine(line)
+    }
+  } catch (err) {
+    // 用户主动取消：向上抛原错误，由调用方按取消语义吞掉
+    if (opts.signal?.aborted) throw err
+    if (err instanceof AiRequestError)
+      throw new AiRequestError(
+        t('{0}（已接收 {1} 字后就断了）', err.message, content.length),
+        err.status,
+      )
+    throw err
+  } finally {
+    if (idle) clearTimeout(idle)
+    opts.signal?.removeEventListener('abort', onAbort)
+  }
+  if (buffer) handleLine(buffer)
+
+  if (tagBuffer) {
+    if (!inThinkBlock) {
+      content += tagBuffer
+      opts.onDelta?.({ content: tagBuffer })
+    }
+    tagBuffer = ''
+  }
+
+  // 兜底保障：非思考模式下，若服务端异常地把答复全塞在 reasoning 字段且 content 为空，回退作为 content
+  if (opts.reasoningEffort === 'none' && !content.trim() && fallbackContent.trim()) {
+    content = fallbackContent
+    opts.onDelta?.({ content: fallbackContent })
+  }
+
+  return {
+    content,
+    reasoning: opts.reasoningEffort === 'none' ? '' : reasoning,
+    toolCalls: [...toolCalls.values()],
+    finishReason,
+    usage: usageFrame ? translateUsage(usageFrame) : undefined,
+  }
+}
+
+/**
+ * 一次性 Chat 补全（stream: false），供生成描述、短释义等场景使用。
+ * 与流式补全共用同一套鉴权、错误翻译与取消语义；完成后同样记进用量台账
+ * （opts.purpose 声明这次请求是干什么的）。
+ *
+ * Command Code 网关只有流式（`stream: true` 是信封里的固定字段），
+ * 因此那里退化成「跑一次流式、只取正文」——对调用方完全无感。
+ */
+export async function chatCompleteWith(
+  provider: ResolvedProvider,
+  model: string,
+  opts: {
+    messages: ChatMessage[]
+    maxTokens?: number
+    temperature?: number
+    /** 思考等级；不传就不发该字段 */
+    reasoningEffort?: ReasoningEffort
+    /** 要求返回严格 JSON（response_format: json_object）；网关不支持时忽略 */
+    json?: boolean
+    signal?: AbortSignal
+    /** 这次请求的用途（只进用量台账，不发到服务端） */
+    purpose?: UsagePurpose
+  },
+): Promise<string> {
+  const startedAt = Date.now()
+  if (provider.protocol === 'commandcode') {
+    const result = await commandCodeStream(provider, model, opts)
+    recordRequest(provider, model, opts.purpose, result.usage ?? estimateUsage(opts.messages, undefined, result.content), Date.now() - startedAt)
+    return result.content
+  }
+  if (provider.protocol === 'anthropic') {
+    const result = await anthropicStream(provider, model, opts)
+    recordRequest(provider, model, opts.purpose, result.usage ?? estimateUsage(opts.messages, undefined, result.content), Date.now() - startedAt)
+    return result.content
+  }
+  if (provider.protocol === 'responses') {
+    const result = await responsesStream(provider, model, opts)
+    recordRequest(provider, model, opts.purpose, result.usage ?? estimateUsage(opts.messages, undefined, result.content), Date.now() - startedAt)
+    return result.content
+  }
+  const url = endpoint(rootOf(provider.baseUrl), '/chat/completions')
+  let res: Response
+  try {
+    res = await httpFetch(url, {
+      method: 'POST',
+      headers: headersFor(provider),
+      body: JSON.stringify(bodyFor(provider, { ...opts, model, stream: false })),
+      signal: opts.signal,
+    })
+  } catch (err) {
+    if (opts.signal?.aborted) throw err // 正常取消，交由调用方吞掉
+    throw new AiRequestError(t('网络请求失败，请检查网络连接'))
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new AiRequestError(toMessage(provider.label, res.status, body), res.status)
+  }
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>
+    usage?: Record<string, unknown>
+  }
+  let content = data.choices?.[0]?.message?.content ?? ''
+  if (opts.reasoningEffort === 'none') {
+    content = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+  }
+  // 非流式响应的 usage 就在信封里（OpenAI 兼容协议的约定）；没有就退回估算
+  recordRequest(provider, model, opts.purpose, data.usage ? translateUsage(data.usage) : estimateUsage(opts.messages, undefined, content), Date.now() - startedAt)
+  return content
+}
+
+/**
+ * 拉取账户可用的模型列表，返回模型 id 数组。
+ * 少数服务不实现该端点（返回 404），此时由调用方提示用户手填模型名。
+ *
+ * 两处按提供商走不同路径：
+ * - 端点路径可取 modelsPath（Command Code 的目录在免鉴权的 /provider/v1/models）；
+ * - goPlanOnly 时按 Go 套餐筛选——目录会给全部模型，而套餐外的选了会被网关拒绝。
+ */
+export async function listModelsWith(provider: ResolvedProvider): Promise<string[]> {
+  const defaultPath = provider.protocol === 'anthropic' ? '/v1/models' : '/models'
+  const primaryUrl = endpoint(rootOf(provider.baseUrl), provider.modelsPath ?? defaultPath)
+  let res: Response
+  try {
+    res = await httpFetch(primaryUrl, {
+      headers: headersFor(provider),
+    })
+    // 兼容回退：如果默认端点报 404 且未指定自定义 modelsPath，尝试备选路径
+    if (res.status === 404 && !provider.modelsPath) {
+      // 1. 如果原先是 /models，尝试 /v1/models；反之亦然
+      const altPath = primaryUrl.endsWith('/models') ? '/v1/models' : '/models'
+      const altUrl = endpoint(rootOf(provider.baseUrl), altPath)
+      const altRes = await httpFetch(altUrl, { headers: headersFor(provider) }).catch(() => null)
+      if (altRes && altRes.ok) {
+        res = altRes
+      } else {
+        // 2. 尝试 Ollama 专有标签端点 /api/tags
+        const ollamaUrl = endpoint(rootOf(provider.baseUrl), '/api/tags')
+        const ollamaRes = await httpFetch(ollamaUrl, { headers: headersFor(provider) }).catch(() => null)
+        if (ollamaRes && ollamaRes.ok) {
+          res = ollamaRes
+        }
+      }
+    }
+  } catch {
+    throw new AiRequestError(t('网络请求失败，请检查网络连接'))
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new AiRequestError(toMessage(provider.label, res.status, body), res.status)
+  }
+  let raw: unknown
+  try {
+    raw = await res.json()
+  } catch {
+    return []
+  }
+  let list: unknown[] = []
+  if (Array.isArray(raw)) {
+    list = raw
+  } else if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>
+    if (Array.isArray(obj.data)) list = obj.data
+    else if (Array.isArray(obj.models)) list = obj.models
+  }
+  return list
+    .map((item) => {
+      if (typeof item === 'string') return item.trim()
+      if (item && typeof item === 'object') {
+        const o = item as Record<string, unknown>
+        return typeof o.id === 'string' ? o.id.trim() : typeof o.name === 'string' ? o.name.trim() : ''
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .filter((id) => !provider.goPlanOnly || isGoPlanModel(id))
+    .sort()
+}

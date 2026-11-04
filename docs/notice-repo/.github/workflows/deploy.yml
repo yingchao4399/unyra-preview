@@ -1,0 +1,143 @@
+# 公告发布工作流（放在**独立的公告仓库** `unyra-notice` 里，不是应用源码仓库）
+#
+# 它只做两件事：
+# 1. 把 Repository Secret 里的 NOTICE_JSON 临时写成 public/notice.json（公告正文）；
+# 2. 连同仓库里已提交的 public/images/（公告配图）一起部署到 GitHub Pages。
+#
+# 四条纪律，改这个文件时别破坏它们：
+# 1. **公告正文不进 Git**：仓库里没有 notice.json，它是运行时生成的，只存在于
+#    Actions 的临时工作区与 Pages 的部署产物里。（配图是例外，见下面的说明。）
+# 2. **公告正文不进日志**：内容经 env 传给脚本（不用命令行参数，免得进进程列表），
+#    校验脚本只打印结论与 id，不打印正文。
+# 3. **只用官方 Action**：actions/checkout、actions/configure-pages、
+#    actions/upload-pages-artifact、actions/deploy-pages。不引第三方 Action，
+#    更不执行公告内容里的任何东西。
+# 4. **配图走 Git**：图片放不进 Secret（GitHub 的 Secret 有 48 KB 硬上限），
+#    所以它们提交在 public/images/ 下，由这里随站点一起部署。图片本来就是公开内容，
+#    进 Git 历史没有额外风险；但要知道它**是**在 Git 历史里的。
+#
+# 触发方式：仓库 → Actions → 左侧选「Deploy notice」→ Run workflow。
+# 前置条件：Settings → Pages → Build and deployment → Source 选 **GitHub Actions**。
+name: Deploy notice
+
+on:
+  # 只手动触发：公告发布是「我想发一句话」的动作，不该被 push 意外带出去
+  workflow_dispatch:
+
+# 最小权限：
+#   contents: read  —— 读仓库（checkout 拿 public/images/）
+#   pages: write    —— 写 Pages 部署
+#   id-token: write —— deploy-pages 用 OIDC 换一次性令牌，不需要 PAT
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一条流水线不并发：两次部署互相打断会留下半成品
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 只为了拿到仓库里已提交的 public/images/（公告配图）。
+      # 注意 checkout 不会带来 notice.json —— 它压根不在仓库里。
+      - name: 取出仓库内容（公告配图在 public/images/）
+        uses: actions/checkout@v5
+
+      - name: 写入 notice.json（内容来自 Secret，不进 Git、不进日志）
+        env:
+          # Secret 经 env 传入：写在 run 的字符串里会出现在日志的「展开后命令」中
+          NOTICE_JSON: ${{ secrets.NOTICE_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NOTICE_JSON:-}" ]; then
+            echo "::error::还没有配置仓库 Secret NOTICE_JSON（Settings → Secrets and variables → Actions → New repository secret）"
+            exit 1
+          fi
+          mkdir -p public
+          # 用 printf 而不是 echo：正文里的反斜杠不该被解释，末尾也不该多一个换行
+          printf '%s' "$NOTICE_JSON" > public/notice.json
+
+      - name: 校验 notice.json（格式不对就终止发布）
+        run: |
+          set -euo pipefail
+          # 从 stdin 读脚本：这样脚本里可以随便用引号，也不必往仓库里多塞一个文件
+          #
+          # ⚠️ 这套规则与客户端的 src/lib/notice.ts 是**两处实现**（公告仓库拿不到
+          # 应用仓库的代码）。改了一边必须改另一边，否则会出现「发布时说没问题、
+          # 客户端读不动」或者反过来。客户端那一侧有单元测试钉着（tests/notice.test.ts）。
+          node --input-type=module - <<'NODE'
+          import { readFileSync } from 'node:fs'
+
+          const fail = (msg) => {
+            console.error('::error::notice.json 校验失败：' + msg)
+            process.exit(1)
+          }
+
+          let raw
+          try {
+            raw = JSON.parse(readFileSync('public/notice.json', 'utf8'))
+          } catch {
+            fail('不是合法的 JSON')
+          }
+          if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) fail('顶层必须是一个对象')
+          if (typeof raw.enabled !== 'boolean') fail('enabled 必须是布尔值')
+
+          const nonEmpty = (v) => typeof v === 'string' && v.trim().length > 0
+          const checkItem = (o, where) => {
+            if (o === null || typeof o !== 'object' || Array.isArray(o)) fail(where + ' 必须是一个对象')
+            if (o.enabled !== undefined && typeof o.enabled !== 'boolean') fail(where + ' 的 enabled 必须是布尔值')
+            if (!nonEmpty(o.id)) fail(where + ' 的 id 必须是非空字符串')
+            if (!nonEmpty(o.title)) fail(where + ' 的 title 必须是非空字符串')
+            if (!nonEmpty(o.content)) fail(where + ' 的 content 必须是非空字符串')
+            if (o.publishedAt !== undefined && typeof o.publishedAt !== 'string') fail(where + ' 的 publishedAt 必须是字符串')
+            if (o.minVersion !== undefined && typeof o.minVersion !== 'string') fail(where + ' 的 minVersion 必须是字符串')
+            return o.id
+          }
+
+          const ids = []
+          if (Array.isArray(raw.notices)) {
+            if (raw.notices.length === 0) fail('notices 是空数组：要停用公告请把 enabled 设成 false，别清空列表')
+            if (raw.notices.length > 20) fail('notices 最多 20 条')
+            raw.notices.forEach((o, i) => ids.push(checkItem(o, 'notices[' + i + ']')))
+          } else {
+            // 旧式：顶层直接是一条公告
+            ids.push(checkItem(raw, '顶层'))
+          }
+
+          const dup = ids.find((id, i) => ids.indexOf(id) !== i)
+          if (dup) fail('id 重复：' + dup)
+
+          // 只打印结论与 id —— **不打印正文**
+          console.log('notice.json 校验通过（' + ids.length + ' 条：' + ids.join(', ') + '）')
+          NODE
+
+      - name: 配置 Pages
+        # 四个 Action 的版本都取当前官方推荐值（各自最新主版本），运行时是 node24。
+        # 不要沿用过时的 v5/v4/v3/v4：那几版跑在 node20 上，GitHub 已开始弃用，
+        # 每次运行都会打一条 deprecation 警告（2026-10 实测）。
+        uses: actions/configure-pages@v6
+
+      - name: 打包静态文件（notice.json + public/images/）
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+          # 部署产物里带着公告正文，保留期压到最短（v5 默认就是 1 天，这里写明确）
+          retention-days: 1
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+      - name: 输出公告地址
+        run: echo "公告地址（填进客户端的 src/lib/noticeConfig.ts）：${{ steps.deployment.outputs.page_url }}notice.json"

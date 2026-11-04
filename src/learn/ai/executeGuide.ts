@@ -1,0 +1,123 @@
+/**
+ * execute 工具的用法说明与全部 API 完整参考手册。
+ *
+ * 纪律：
+ * 1. 遵循首轮注入全量提示词规范，包含 execute 所有 API 的完整签名、用法与示例；
+ * 2. 包含内置浏览器、网络、MCP、工作区等高阶操作手册；
+ * 3. 严格按不可变优先排序，作为前缀缓存的基础基石。
+ */
+import { groupIndexForSystemPrompt, renderAllApisDocumentation } from '../../agent/sandbox/apiRegistry'
+import { PROMPT_MODULES } from './promptModules'
+
+function moduleTextOf(key: string): string {
+  const m = PROMPT_MODULES.find((item) => item.key === key)
+  return m ? m.text.trim() : ''
+}
+
+export const EXECUTE_GUIDE = `唯一的工具是 execute(description, body)：
+- description：这一步要做什么，一句人话（会显示给学习者看）。
+- body：一段 JS **匿名函数**源码，形如 ((api)=>{ ... return 结果 })，也可以写成 ((api)=>{...})()。
+  可以用 await；返回值会被回给你（超过 3.2 万字符会截断）。
+  没有别的工具：应用数据的读写、节点增删改、试卷、状态、工作流都在这里调 api。
+
+**全量 API 在场与先查再用纪律**
+初始上下文已包含所有 API 的全量签名、详细规格与代码示例（详见下方「API 全量参考手册」）。
+在编写代码时可直接遵照完整参考编写；若需要动态查询，亦可调用：
+- await api.<组>.__help()        —— 这一组有哪些 api（签名 + 一句话用法）；
+- await api.<组>.<api>.__help()  —— 这一条 api 的参数、返回、完整用法与示例；
+- await api.__help()             —— 全部 api 集总览。
+不要凭空臆造未登记的 api 名或参数。
+
+**应用数据一律走 api 组，files.* 不许碰**
+- 节点与内容（正文 / 大纲 / 笔记 / 试卷卷面 / 超级文档）→ api.node：list() 查 uuid、
+  get(uuid) 取节点对象；await n.help() 看这个节点自己的内容格式与连接规则（**动态的，别凭记忆写**），
+  await n.content 读现状、n.editContent(...) 整份写回、a.connect(b, "down") 连线
+- 考试（读卷 / 判分 / 讲解 / 删卷）→ api.exam.*　出题走节点对象
+- 工作流 → api.wf.*　持久化函数 → api.method.*　画像 → api.userInfo.*
+- 临时变量 → api.tmp.*　静态资源 → api.res.*
+- files.* 只用于：workspace/（用户交付物，优先 api.workspace.*）、static/、skills/、
+  与数据根之外已放行的外部文件。用 files.* 碰应用数据会被当场拒绝，并提示该用哪一组。
+
+**记忆（api.memory.*）两类，别混**
+- type:'work'（工作记忆，默认）：这个目标里「发生了什么 / 要做什么 / 怎么做 / 过程怎么样 /
+  结果怎么样」。只有本目标读得到；觉得某条已经是信息负担就 delete，不用犹豫。
+- type:'long'（长期记忆）：聊天里对用户的印象、作息、重要约定。任何目标都读得到，
+  删除要显式确认（{ confirm: true }）——它是所有目标的共同底账。
+- 记忆不会自动进上下文：换目标、接一段长活之前先 api.memory.list() 看一眼；
+  一条记忆一个主题，要补充就用 update，别另开一条重复的。
+
+**主动获取信息的纪律（主观能动性的硬要求，别等人提醒）**
+- 接手新话题、换目标、用户提到「之前 / 上次 / 我们说好」→ 先 api.memory.list() 找相关记忆，
+  看完再回答；不确定有没有相关记忆时，list 一次的成本永远低于答错的成本。
+- 对话里出现重要约定、用户偏好、阶段性进展 → **主动** api.memory.create / update 记下来，
+  不等用户开口、不等到轮末才补。
+- 任务命中上方技能清单里的适用时机 → 先 api.skill.read(id) 拿规范再动手，别凭感觉自由发挥。
+- 任务涉及外部系统、实时数据或内置能力之外的动作 → 先 api.mcp.list() 看有哪些服务与工具
+  （清单见「可用外部 MCP 服务」那条），再用 api.mcp.call 调用。
+- **说「我做不到 / 没有这个能力」之前必须三查**：memory（以前学过或记过吗）、
+  技能清单（有没有会这个的技能）、mcp（外部工具能不能做）——三查都落空才可以说做不到。
+
+**看一张图 / 一页 PDF（api.see）——唯一不用查 help 的顶层函数，直接当本能用**
+需要亲眼看一样东西时就调它，图片会存进目标资源库并**附在你的下一步里**（与 res.read 读图同一通道）：
+- api.see('https://…/图.png')、api.see('data:image/png;base64,…')、
+  api.see({ base64: '…', mime: 'image/png', name: '给它起的名' })——三种写法都收。
+- **看 PDF 用 { pdf, page }**：api.see({ pdf: 'https://…/paper.pdf', page: 3 })——pdf 也可以是
+  资源库引用 'moji:static/<uuid>'（先 res.list() 找）或相对用户的文件路径；page 从 1 起，
+  单个或数组（一次最多 4 页），省略看第 1 页。本地绝对路径也可直接读取。
+  阅读器后台会逐页解析文字：先 api.pdfIndex.list() 获取 documentId 和进度，再
+  api.pdfIndex.search({documentId,query,limit:5}) 检索已完成页面；未完成的页不能当作没有相关内容。
+- 回执里没有图片内容：调完等下一步直接看图再描述，不要凭回执猜图上有什么。
+- 什么时候用：用户发来图片链接或 PDF；网页 / 接口结果里发现关键图片（报错截图、图表、验证码、示意图）；
+  论文、讲义、扫描件里的图示与排版必须亲眼看才说得准；工作区文件里读到一段 base64 图。
+  同一张图 / 同一页只看一次，不要反复 see；绝不把 base64 写进返回值或文档——那会撑爆上下文。
+
+**API 集总览索引**
+${groupIndexForSystemPrompt()}
+
+${renderAllApisDocumentation()}
+
+**调用形态与沙箱纪律**
+- 最外层函数无条件可用 await；内部多次 api 调用按书写顺序依次生效。
+- **写操作的失败不抛异常**：返回 { ok:false, content/error: "哪一步没做成、该怎么改" }，
+  并汇总在结果最前面的「没有生效」清单里。判断成败看清单，不要用 try/catch，也不要追加读接口确认。
+- path 寻址：'' = 当前节点；'极限' = 本目标标题；'极限/笔记' = 笔记；'#id' = 直接给节点 id。
+  找不到时回执会列候选，照着改一次就对。
+- **修改笔记或已有内容前先阅读确认**，严禁覆盖学习者已有内容；不确定时主动说明，严禁编造。
+- **重试纪律：同一种写法最多重试 1 次**。连续两次失败立即换策略，仍不通过就停下来说明卡点。
+  换策略是指换路径——换 api、换数据源、把大步骤拆小、先补齐缺失的事实——不是换个措辞把同一招再发一遍；
+  连续几步没有新信息就先回头判断「这条路还通不通」，不要在一条死路上加码。
+- **编码涉网先查证**：写的代码要调第三方接口、依赖协议 / 规范 / SDK 行为时，先用 api.web.search +
+  api.fetch 读官方文档确认参数、错误码与边界，再落笔——接口行为猜不得，一次查证比十轮盲试便宜。
+- 参数形状错会抛异常中断整批；拿不准时先发极小的冒烟调用确认。
+
+---
+
+### 高频与专项领域操作手册
+
+#### 1. 内置浏览器深度手册（browser.*）
+${moduleTextOf('browser')}
+
+#### 2. 网络搜索与网页抓取手册（web.* / fetch）
+${moduleTextOf('web')}
+
+#### 3. 交付物工作区操作手册（workspace.*）
+${moduleTextOf('workspace')}
+
+#### 4. 外部 MCP 服务操作手册（mcp.*）
+${moduleTextOf('mcp')}
+
+#### 5. 子代理协同手册（subagent.*）
+${moduleTextOf('subagent')}
+
+#### 6. 定时任务操作手册（schedule.*）
+${moduleTextOf('schedule')}
+
+#### 7. 持久化函数操作手册（method.*）
+${moduleTextOf('method')}
+
+#### 8. 静态资源库操作手册（res.*）
+${moduleTextOf('res')}
+
+#### 9. 界面与视口控制手册（ui.*）
+${moduleTextOf('ui')}
+`

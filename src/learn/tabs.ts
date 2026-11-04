@@ -1,0 +1,518 @@
+import type { DocView, LearnTab, TabRef } from './types'
+import { t } from '../i18n'
+
+/**
+ * 自由页签的纯逻辑：怎么算一个页签的身份、开关与左右关闭各留下什么、默认用哪种视图。
+ *
+ * 单独成模块（而不是写在 LearnWorkspace 里）有两个理由：
+ * 1. 这些判断全是纯函数，可以被单元测试钉住——「关闭右侧」这种操作一旦算错，
+ *    用户看到的是「我关的是右边，它把我左边那个也关了」，而界面上一眼看不出来；
+ * 2. 后续还有别的入口要开页签（大纲链接、agent、搜索结果），逻辑只该有一份。
+ */
+
+/** 能渲染出预览的扩展名：markdown 与 html。别的文本类型只能看源码（见 viewOf） */
+const PREVIEW_EXTS = ['.md', '.markdown', '.html', '.htm']
+
+/** 本地文件的**媒体预览**扩展名：图片 / 音频 / 视频（看的是内容本身，不是文本） */
+const MEDIA_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico', '.avif',
+  '.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.opus',
+  '.mp4', '.webm', '.mkv', '.mov', '.m4v',
+  '.pdf',
+])
+
+/** 路径里的文件名（两种分隔符都认：本地文件来自 Windows，链接里可能是正斜杠） */
+export function fileNameOf(p: string): string {
+  const i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+  return i >= 0 ? p.slice(i + 1) : p
+}
+
+/** 扩展名（含点，小写）；没有扩展名时返回空串。点开头的名字（.gitignore）不算扩展名 */
+export function extOf(name: string): string {
+  const base = fileNameOf(name)
+  const i = base.lastIndexOf('.')
+  return i > 0 ? base.slice(i).toLowerCase() : ''
+}
+
+/** 这个文件能不能预览（md / html） */
+export function isPreviewable(name: string): boolean {
+  return PREVIEW_EXTS.includes(extOf(name))
+}
+
+/** 这个文件是不是走**媒体预览**的（图片 / 音频 / 视频） */
+export function isPdfFile(name: string): boolean {
+  return extOf(name) === '.pdf'
+}
+
+export function isMediaFile(name: string): boolean {
+  return MEDIA_EXTS.has(extOf(name))
+}
+
+/**
+ * 页签的身份。各种来源共用一个命名空间，前缀把它们分开：
+ * 节点的教学文档是 `t:`、某一份笔记是 `n:`、某一份超级文档是 `s:`、
+ * 某一次考试的只读副本是 `e:`、某个目标的大纲页是 `o:`、本地文件是 `l:`、
+ * 网页页签是 `w:`（key 是开签那一刻生成的随机身份，见 newWebKey）。
+ * 于是「同一个东西只开一次」这件事只要比字符串就够了——笔记改名时替换的也是它
+ * （见 replaceTabRef）。
+ *
+ * 试卷副本按**考试**（而不是试卷）开页签：同一份卷子考两次是两份不同的副本，
+ * 各带各的作答、判分与错题讲解。
+ */
+export function tabKey(ref: TabRef): string {
+  if (ref.kind === 'teach') return 't:' + ref.nodeId
+  if (ref.kind === 'note') return 'n:' + ref.nodeId + ':' + ref.note
+  if (ref.kind === 'super') return 's:' + ref.nodeId + ':' + ref.name
+  if (ref.kind === 'exam') return 'e:' + ref.examId + ':' + ref.attemptId
+  if (ref.kind === 'outline') return 'o:' + ref.nodeId
+  // 工作区内部文件：节点 + 「相对工作区目录」的路径段（目录改名不影响它，见 types 的 ws 分支）
+  if (ref.kind === 'ws') return 'ws:' + ref.nodeId + ':' + ref.seg
+  // 网页按**开签那一刻生成的 key**（而不是网址）认身份：同一个网址可以开两枚，起始页也不冲突
+  if (ref.kind === 'web') return 'w:' + ref.key
+  // 视频学习（实验）同样全局只有一份：顶栏那颗按钮点多少次都是切回同一枚，
+  // 上一次解析到哪个视频还留在页签里
+  if (ref.kind === 'video') return ref.videoId ? 'v:' + ref.videoId : 'v:new'
+  // 插件文档全局一份：设置里的入口点多少次都是切回同一页
+  if (ref.kind === 'pluginDoc') return 'p:plugin-doc'
+  if (ref.kind === 'sponsors') return 'p:sponsors'
+  // 设置页与用量页同样全局只有一份：从哪个入口打开都是切到它，不会开出第二枚
+  if (ref.kind === 'settings') return 'set:settings'
+  if (ref.kind === 'usage') return 'u:usage'
+  // 日程表全局只有一份：从顶栏 tip、提醒弹层还是设置里打开，都是切到同一枚页签
+  if (ref.kind === 'schedule') return 'sc:schedule'
+  // 超级导师设置全局一份；记忆按目标归档，页签也一枚目标一份
+  if (ref.kind === 'mind') return 'm:' + ref.goalId
+  if (ref.kind === 'agentSettings') return 'set:agent'
+  if (ref.kind === 'blank') return 'b:' + ref.key
+  // 新建文件页签：还没有落点，身份只能是开签那一刻的随机后缀
+  if (ref.kind === 'draft') return 'd:' + ref.key
+  return 'l:' + ref.path
+}
+
+export function makeTab(ref: TabRef, at: number, view?: DocView): LearnTab {
+  return { id: tabKey(ref), ref, ...(view ? { view } : {}), createdAt: at }
+}
+
+/** 空白页签的身份后缀：开签那一刻生成 */
+export function newBlankKey(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+/** 构造一枚空白页签（底页） */
+export function makeBlankTab(at = Date.now()): LearnTab {
+  return makeTab({ kind: 'blank', key: newBlankKey() }, at)
+}
+
+/**
+ * 新建文件页签的身份后缀：开签那一刻生成。
+ *
+ * 与空白页签同一种随机后缀（两者都不指向任何已有东西，没有别的身份可用），
+ * 但前缀不同（`d:` vs `b:`），所以「一个栏只有一枚新页签」那条规矩不会把新建文件页签
+ * 也算进去——用户完全可以同时开好几份没保存的草稿。
+ */
+export function newDraftKey(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+/** 构造一枚新建文件页签（临时编辑页） */
+export function makeDraftTab(at = Date.now()): LearnTab {
+  return makeTab({ kind: 'draft', key: newDraftKey() }, at)
+}
+
+/** 新建文件的默认文件名后缀：需求口径是 txt */
+export const DRAFT_DEFAULT_EXT = '.txt'
+
+/** 保存新建文件时对话框里的默认文件名（用户改掉就是他的选择） */
+export function draftFileName(ext: string = DRAFT_DEFAULT_EXT): string {
+  return t('未命名') + ext
+}
+
+/** 这是不是一枚「新页签」（空白底页）；新建文件页签不算 */
+export function isBlankTab(tab: LearnTab): boolean {
+  return tab.ref.kind === 'blank'
+}
+
+/** 页签挂在哪个节点上；本地文件、网页、守卫、报告、设置与用量页都不属于任何节点（工作区内部文件挂在它的节点上） */
+export function tabNodeId(ref: TabRef): string | null {
+  return ref.kind === 'local' ||
+    ref.kind === 'web' ||
+    ref.kind === 'video' ||
+    ref.kind === 'pluginDoc' ||
+    ref.kind === 'sponsors' ||
+    ref.kind === 'settings' ||
+    ref.kind === 'usage' ||
+    ref.kind === 'schedule' ||
+    ref.kind === 'mind' ||
+    ref.kind === 'agentSettings' ||
+    ref.kind === 'blank' ||
+    // 新建文件页签还没有落点：保存那一刻才知道它属于哪儿（见 types 的 draft 分支）
+    ref.kind === 'draft'
+    ? null
+    : ref.nodeId
+}
+
+/**
+ * 从页签 id 反解出它挂在哪个节点上（本地文件返回 null）。
+ *
+ * 与 tabKey 是一对，改格式必须一起改（见 learn/drafts 的 normalizeDrafts：
+ * 读回来的暂存区要按它判断「这个页签指向的节点还在不在」）。
+ */
+export function tabIdNodeId(id: string): string | null {
+  // e: 开头的试卷副本不带 nodeId（它由 examId 决定归属），所以这里也返回 null——
+  // 暂存区按它判断「这个页签指向的节点还在不在」，而试卷副本本来就没有暂存这回事
+  if (
+    !id.startsWith('t:') &&
+    !id.startsWith('n:') &&
+    !id.startsWith('s:') &&
+    !id.startsWith('o:') &&
+    !id.startsWith('ws:')
+  )
+    return null
+  const rest = id.slice(id.startsWith('ws:') ? 3 : 2)
+  const cut = rest.indexOf(':')
+  return cut < 0 ? rest : rest.slice(0, cut)
+}
+
+/** web 页签的身份后缀：开签那一刻生成、导航不换（见 TabRef 的 web 分支与 tabKey） */
+export function newWebKey(): string {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+}
+
+/**
+ * 页签上显示的名字：教学文档用节点名，笔记与超级文档用各自的名字。
+ *
+ * 试卷副本的名字要查一次数据（「《极限小考》8/12 · 09-20」），所以它由调用方给一个
+ * 查表函数——页签这一层不认识 store。
+ */
+export function tabTitle(
+  ref: TabRef,
+  nodeTitle: (nodeId: string) => string | undefined,
+  examTitle?: (examId: string, attemptId: string) => string | undefined,
+  /** 绑定视频的标题（来自视频资源；创建态没有） */
+  videoTitle?: (videoId: string) => string | undefined,
+  goalTitle?: (goalId: string) => string | undefined,
+): string {
+  if (ref.kind === 'teach') return nodeTitle(ref.nodeId) ?? t('已删除的节点')
+  if (ref.kind === 'note') return ref.note
+  if (ref.kind === 'super') return ref.name
+  if (ref.kind === 'exam') return examTitle?.(ref.examId, ref.attemptId) ?? t('试卷副本')
+  if (ref.kind === 'outline') return (nodeTitle(ref.nodeId) ?? goalTitle?.(ref.nodeId) ?? t('已删除的节点')) + t(' · 结构')
+  if (ref.kind === 'web') {
+    // 页面的真标题是活信息（见 types 的 WebTabMeta），这里只能兜底出域名；起始页没有域名
+    if (!ref.url) return t('新网页页签')
+    try {
+      return new URL(ref.url).host
+    } catch {
+      return ref.url
+    }
+  }
+  // 视频学习（实验）页签：解析到的视频标题活在页签内容里，栏上统一叫这一个名字
+  if (ref.kind === 'video') return ref.videoId ? (videoTitle?.(ref.videoId) ?? t('视频学习')) : t('新建视频')
+  if (ref.kind === 'pluginDoc') return t('插件开发文档')
+  if (ref.kind === 'sponsors') return t('赞助者名单')
+  if (ref.kind === 'settings') return t('设置')
+  if (ref.kind === 'usage') return t('用量统计')
+  if (ref.kind === 'schedule') return t('日程安排')
+  if (ref.kind === 'mind') return t('记忆管理')
+  if (ref.kind === 'agentSettings') return t('超级导师设置')
+  if (ref.kind === 'blank') return t('新页签')
+  // 新建文件页签：还没有文件名，就叫「未命名」——保存之后它变成 local 页签，显示真实文件名
+  if (ref.kind === 'draft') return t('未命名')
+  // 工作区内部文件：显示文件名（相对段可能带几层目录）
+  if (ref.kind === 'ws') return fileNameOf(ref.seg)
+  return ref.title || fileNameOf(ref.path)
+}
+
+/**
+ * 页签的**路径后缀**：同名页签靠它区分（两个节点各有一份「错题本」、两个目录各有一个
+ * notes.md）。只在真有重名时上层才会显示它，见 LearnWorkspace 的 tabTrails。
+ *
+ * 说「它住在哪儿」：节点类页签取节点到目标的路径（「极限/夹逼定理」），
+ * 本地文件取所在目录，记忆页签取**目标本身**（它不挂节点，goalLabel 由调用方解析）。
+ * 试卷副本不参与——它的名字里本来就带着考试时间。
+ */
+export function tabTrail(
+  ref: TabRef,
+  nodePath: (nodeId: string) => string,
+  /** 记忆页签的后缀解析（目标原话）；不传时记忆页签没有后缀 */
+  goalLabel?: (goalId: string) => string,
+): string {
+  if (ref.kind === 'exam') return ''
+  if (ref.kind === 'web') return ''
+  // 系统页（设置/用量/导师设置/新建目标/空白页签）不挂在节点上，也没有「住在哪儿」可言；
+  // 新建文件页签同样还没有落点——保存之后它换成 local，后缀才会出现
+  if (
+    ref.kind === 'video' ||
+    ref.kind === 'pluginDoc' ||
+    ref.kind === 'sponsors' ||
+    ref.kind === 'settings' ||
+    ref.kind === 'usage' ||
+    ref.kind === 'schedule' ||
+    ref.kind === 'agentSettings' ||
+    ref.kind === 'blank' ||
+    ref.kind === 'draft'
+  )
+    return ''
+
+  if (ref.kind === 'mind') return goalLabel ? goalLabel(ref.goalId) : ''
+  if (ref.kind === 'local') {
+    const i = Math.max(ref.path.lastIndexOf('/'), ref.path.lastIndexOf('\\'))
+    return i > 0 ? ref.path.slice(0, i) : ''
+  }
+  // 工作区内部文件：后缀是它在工作区里的目录（`项目A/src`）——两个项目各有一个 README.md 时靠它分
+  if (ref.kind === 'ws') {
+    const i = ref.seg.lastIndexOf('/')
+    return i > 0 ? ref.seg.slice(0, i) : ''
+  }
+  return nodePath(ref.nodeId)
+}
+
+/**
+ * 这个页签此刻该用哪种视图。
+ *
+ * 默认值按文件类型给：教学文档与笔记都是 Markdown，默认看渲染结果；
+ * 本地文件里只有 md / html 能预览，其余（txt 之类）默认落到源码——
+ * 给一个纯文本文件渲染出一个「预览」是骗人的。
+ *
+ * empty = 这份正文此刻是空的（见 LearnWorkspace 的 emptyNote）：空笔记的预览是一片空白，
+ * 而用户打开它就是要往里写，所以默认落到源码（编辑）视图，预览按钮也一并置灰。
+ * 用户自己选过视图（tab.view）就听他的——他刚在空笔记里点过预览，那是他的选择。
+ */
+export function viewOf(tab: LearnTab, empty = false): DocView {
+  if (tab.view) return tab.view
+  // 新建文件页签还没有类型可言：它就是一张用来写的纸，永远进编辑视图
+  if (tab.ref.kind === 'draft') return 'source'
+  if (empty) return 'source'
+  // 工作区内部文件与本地文件同一套默认：媒体进媒体预览、markdown 进预览、其余落到源码
+  if (tab.ref.kind === 'local' || tab.ref.kind === 'ws') {
+    const name = tab.ref.kind === 'local' ? tab.ref.path : tab.ref.seg
+    if (isMediaFile(name)) return 'media'
+    // 需求口径：markdown 默认预览，**其余文本一律默认编辑**（html 也不例外）
+    return /\.(md|markdown)$/i.test(name) ? 'preview' : 'source'
+  }
+  return 'preview'
+}
+
+/** 打开一个页签：已经有了就原样返回（由调用方负责激活），不重复开、也不改顺序 */
+export function openTab(tabs: LearnTab[], ref: TabRef, at: number): LearnTab[] {
+  const id = tabKey(ref)
+  return tabs.some((t) => t.id === id) ? tabs : [...tabs, makeTab(ref, at)]
+}
+
+/** 换掉某个页签指向的东西（笔记改名走它），保留视图选择与创建时间 */
+export function replaceTabRef(tabs: LearnTab[], from: TabRef, to: TabRef): LearnTab[] {
+  const fromId = tabKey(from)
+  const toId = tabKey(to)
+  if (fromId === toId) return tabs
+  let hit = false
+  const next = tabs.map((t) => {
+    if (t.id !== fromId) return t
+    hit = true
+    return { ...t, id: toId, ref: to }
+  })
+  return hit ? next : tabs
+}
+
+/** 某个节点全部页签的 id（删节点、关掉一个教学文档时用） */
+export function tabIdsOfNode(tabs: LearnTab[], nodeId: string): string[] {
+  return tabs.filter((t) => tabNodeId(t.ref) === nodeId).map((t) => t.id)
+}
+
+/** 判断一个页签是否为真正文档（教学文档、笔记、超级文档、外部文件与工作区内部文件） */
+export function isDocumentTab(ref: TabRef): boolean {
+  return (
+    ref.kind === 'teach' ||
+    ref.kind === 'note' ||
+    ref.kind === 'super' ||
+    ref.kind === 'local' ||
+    ref.kind === 'ws' ||
+    // 新建文件页签算文档：它装着用户正在写的东西，「关闭非文档」不该把它一起收掉
+    ref.kind === 'draft'
+  )
+}
+
+/** 右键菜单里的关闭方式 */
+export type TabCloseMode =
+  | 'self'
+  | 'left'
+  | 'right'
+  | 'others'
+  | 'all'
+  | 'unrelated'
+  | 'children'
+  | 'parents'
+  | 'nonDocs'
+  | 'force'
+  | 'forceOthers'
+
+/**
+ * 右键菜单里的文案。
+ */
+export const TAB_CLOSE_LABEL: Record<TabCloseMode, string> = {
+  self: '关闭',
+  left: '关闭左侧',
+  right: '关闭右侧',
+  others: '关闭其他',
+  all: '全部关闭',
+  unrelated: '关闭无关联',
+  children: '关闭子级',
+  parents: '关闭父级',
+  nonDocs: '关闭非文档',
+  force: '关闭（强制）',
+  forceOthers: '关闭其他（强制）',
+}
+
+/**
+ * 关闭一批页签，并决定关完之后该激活哪一个。
+ *
+ * 落点规则与 vscode 一致：先往**右**找最近的一个还留着的页签，右边没有了才往左。
+ * 「全部关闭」自然落在 null 上（一个不剩）。被关掉的那一片里不含当前页签时，
+ * 当前页签保持不变——关别人不该把我正在看的这个换掉。
+ *
+ * `preferVisible` 是目标页签组带来的修正（见 groups/goals 的 visibleTabs）：页签实体
+ * 全住在格子里，栏上却只画「公共 + 当前目标」那一套——物理顺序里因此躺着大量
+ * **栏上看不见的页签**。落点若照物理顺序挑，会落到一枚栏上没有的页签上，上层跟着它
+ * retarget 就会把当前目标翻走，整栏页签当场换成另一套，看起来像「全组被关掉」。
+ * 传了它，落点先在看得见的那批里按同一条右-左规则挑；整格都看不见时**不落任何一枚
+ * 藏着的页签**——补一枚空白页签当落点（见下）。不传则维持纯物理行为（程序化关闭等场景）。
+ */
+export function closeTabs(
+  tabs: LearnTab[],
+  id: string,
+  mode: TabCloseMode,
+  active: string | null,
+  closingIds?: string[],
+  preferVisible?: (t: LearnTab) => boolean,
+): { tabs: LearnTab[]; active: string | null } {
+  const idx = tabs.findIndex((t) => t.id === id)
+  if (idx < 0) return { tabs, active }
+  const closing = new Set<string>()
+  if (closingIds && closingIds.length > 0) {
+    for (const cid of closingIds) closing.add(cid)
+  } else if (mode === 'all') {
+    for (const t of tabs) closing.add(t.id)
+  } else if (mode === 'self' || mode === 'force') {
+    closing.add(tabs[idx].id)
+  } else if (mode === 'left') {
+    for (let i = 0; i < idx; i++) closing.add(tabs[i].id)
+  } else if (mode === 'right') {
+    for (let i = idx + 1; i < tabs.length; i++) closing.add(tabs[i].id)
+  } else if (mode === 'nonDocs') {
+    for (const t of tabs) if (!isDocumentTab(t.ref)) closing.add(t.id)
+  } else {
+    for (const t of tabs) if (t.id !== id) closing.add(t.id)
+  }
+  // 规矩：tab 组中的大纲 tab 只能由自身关闭（自身关闭按钮/自身右键菜单），其他的关闭方式不会影响到大纲 tab
+  for (const t of tabs) {
+    if (t.ref.kind === 'outline' && ((mode !== 'self' && mode !== 'force') || t.id !== id)) {
+      closing.delete(t.id)
+    }
+  }
+  const keep = tabs.filter((t) => !closing.has(t.id))
+  if (active && keep.some((t) => t.id === active)) return { tabs: keep, active }
+  const anchor = mode === 'all' ? 0 : idx
+  const rest = tabs.map((t, i) => ({ t, i })).filter((x) => !closing.has(x.t.id))
+  // 落点先在「看得见」的那批里挑：右边的看得见就落右边，右边没有才往左找。
+  let landing: { t: LearnTab; i: number } | undefined
+  if (preferVisible) {
+    const shown = rest.filter((x) => preferVisible(x.t))
+    landing = shown.find((x) => x.i >= anchor) ?? shown.filter((x) => x.i < anchor).pop()
+    if (!landing && rest.length > 0) {
+      /*
+       * 看不见的保底也不落：这一格还剩的全是别的目标藏起来的页签，把哪一枚顶到眼前
+       * 都是在「退到别的 tab 组」——用户得把它们一枚一枚关掉，没完没了。改补一枚
+       * 空白页签当落点：藏着的保持沉睡（不激活就不进栏），切到它们的目标时原样还在。
+       * 「全部关闭」走不到这里（rest 为空）：落点交给 settle 兜底——单格补空白、多格收格。
+       *
+       * 补之前先看这一格里是不是已经有一枚新页签：**一个栏有且只有一枚**（见 openInGroup），
+       * 有就用它当落点，别再补第二枚。
+       */
+      const existingBlank = keep.find((t) => t.ref.kind === 'blank')
+      if (existingBlank) return { tabs: keep, active: existingBlank.id }
+      const blank = makeBlankTab()
+      return { tabs: [...keep, blank], active: blank.id }
+    }
+  }
+  landing = landing ?? rest.find((x) => x.i >= anchor) ?? rest[rest.length - 1]
+  return { tabs: keep, active: landing ? landing.t.id : null }
+}
+
+/** 按 id 关掉若干个页签（节点被删除时用；删掉的正是当前那个才换落点） */
+export function closeTabsByIds(
+  tabs: LearnTab[],
+  ids: string[],
+  active: string | null,
+): { tabs: LearnTab[]; active: string | null } {
+  const doomed = new Set(ids)
+  if (!doomed.size) return { tabs, active }
+  const keep = tabs.filter((t) => !doomed.has(t.id))
+  if (active && !doomed.has(active)) return { tabs: keep, active }
+  const rest = tabs.map((t, i) => ({ t, i })).filter((x) => !doomed.has(x.t.id))
+  const firstIdx = tabs.findIndex((t) => doomed.has(t.id))
+  const landing = rest.find((x) => x.i >= firstIdx) ?? rest[rest.length - 1]
+  return { tabs: keep, active: landing ? landing.t.id : null }
+}
+
+/* ---------- 页签的拖动与切换 ---------- */
+
+/**
+ * 按给定的 id 顺序重排页签。
+ *
+ * 传进来的 ids 是**拖动之后希望看到的顺序**，允许它与现有列表对不齐：
+ * 拖动过程中算出来的那份可能少一个 id（例如同一帧里别处刚开了一个页签），
+ * 或者多一个已经不存在的 id（刚被关掉）。因此这里以「现有列表」为准——
+ * 认得的按新顺序排在前面，没提到的按原顺序接在后面，认不出的直接忽略。
+ * 这样任何一帧的快照都不会让页签凭空消失或重复。
+ */
+export function reorderTabs(tabs: LearnTab[], ids: string[]): LearnTab[] {
+  const byId = new Map(tabs.map((t) => [t.id, t]))
+  const out: LearnTab[] = []
+  for (const id of ids) {
+    const t = byId.get(id)
+    if (!t || out.includes(t)) continue
+    out.push(t)
+  }
+  for (const t of tabs) if (!out.includes(t)) out.push(t)
+  return out
+}
+
+/**
+ * 沿页签栏走一步：delta 为 +1 / -1，到头**绕回**另一端（循环）。
+ *
+ * 「按住右键横向拖动」用它：拖动是连续的，走到头若卡住，用户会以为拖动失灵了。
+ * 一个页签都没有时返回 null（没有可去的地方）。
+ */
+export function stepTab(tabs: LearnTab[], active: string | null, delta: number): string | null {
+  if (!tabs.length) return null
+  if (delta === 0) return active
+  const i = tabs.findIndex((t) => t.id === active)
+  // 当前页签不在列表里（刚被关掉）：从最前/最后重新进场
+  if (i < 0) return delta > 0 ? tabs[0].id : tabs[tabs.length - 1].id
+  const n = tabs.length
+  return tabs[(((i + delta) % n) + n) % n].id
+}
+
+/** 页签在栏上的序号；找不到返回 -1（用来判断切换动画的方向） */
+export function tabIndex(tabs: LearnTab[], id: string | null): number {
+  return id ? tabs.findIndex((t) => t.id === id) : -1
+}
+
+/**
+ * 被拖的那一项从 from 挪到 to，它的**落点**相对原位置一共移了多少像素（正数 = 往右）。
+ *
+ * widths 是按下那一刻量到的每个页签的宽度（顺序就是当时的页签顺序），gap 是页签间距。
+ * 为什么是量下来的那一份而不是现量：拖动过程中旁边的页签一直在让位，实时量出来的矩形
+ * 一直在动，拿它算会来回抖（见 TabBar 的拖动排序）。
+ *
+ * 落点 = 重排之后它左边该在的位置：往右挪是它跨过的那些页签的宽度之和（每个还要算上
+ * 一份间距），往左挪是负的这一份。松手那一帧要拿它把「手指底下的位置」换算到新落点上，
+ * 差一格就会横着抽一下（见 TabBar 的 settle）。
+ */
+export function dragSlotDelta(widths: number[], from: number, to: number, gap: number): number {
+  if (to === from) return 0
+  let sum = 0
+  if (to > from) for (let i = from + 1; i <= to; i++) sum += (widths[i] ?? 0) + gap
+  else for (let i = to; i < from; i++) sum += (widths[i] ?? 0) + gap
+  return to > from ? sum : -sum
+}
+

@@ -1,0 +1,152 @@
+{
+  "runs": [
+    {
+      "label": "first-session",
+      "firstPageMs": 16933,
+      "firstPageNetwork": {
+        "ranges": [
+          "bytes=0-1048575",
+          "bytes=208797696-208800121",
+          "bytes=208732160-208797695",
+          "bytes=1048576-1114111",
+          "bytes=1114112-1179647"
+        ],
+        "urls": [
+          "unyra-pdf://ccffc56f2a4849b483b6043bdf6ca5ca/document.pdf",
+          "unyra-pdf://ccffc56f2a4849b483b6043bdf6ca5ca/document.pdf",
+          "unyra-pdf://ccffc56f2a4849b483b6043bdf6ca5ca/document.pdf",
+          "unyra-pdf://ccffc56f2a4849b483b6043bdf6ca5ca/document.pdf",
+          "unyra-pdf://ccffc56f2a4849b483b6043bdf6ca5ca/document.pdf"
+        ],
+        "requestedBytes": 1247610,
+        "fullRequests": 0
+      },
+      "preloadedMs": 98,
+      "jump500Ms": 3965,
+      "jump686Ms": 2047,
+      "jump500Timing": {
+        "pdfCanvas": "500",
+        "pdfReady": "true",
+        "pdfLoadMs": "2996",
+        "pdfRenderMs": "844"
+      },
+      "jump686Timing": {
+        "pdfCanvas": "686",
+        "pdfReady": "true",
+        "pdfLoadMs": "947",
+        "pdfRenderMs": "1013"
+      },
+      "mode": "range",
+      "darkPixelSamples": 6763,
+      "canvasCount": 4,
+      "maxCanvases": 6,
+      "oldReleased": true,
+      "pagePosition": 8.912498474121094,
+      "memory": {
+        "workingSetSize": 414532,
+        "peakWorkingSetSize": 419628,
+        "privateBytes": 386856
+      },
+      "stressMemory": [
+        {
+          "workingSetSize": 532152,
+          "peakWorkingSetSize": 532152,
+          "privateBytes": 408476
+        },
+        {
+          "workingSetSize": 503336,
+          "peakWorkingSetSize": 581296,
+          "privateBytes": 348028
+        }
+      ],
+      "indexed": [
+        {
+          "documentId": "45fd6f3f9a05e1b59cf38d43340680c2a6da5a7f731cabc71d670690564be67d",
+          "path": "D:\\BaiduNetdiskDownload\\实验心理学  第9版_坎特威茨.pdf",
+          "total": 686,
+          "indexed": 2
+        }
+      ],
+      "status": "页面渲染：已显示 · 当前页待解析后台识别 2/686 · 正在识别第 2 页暂停识别",
+      "base64Reads": 0,
+      "ocrCalls": 2,
+      "ownOcrPages": [
+        1,
+        2
+      ],
+      "ownCachePages": [],
+      "outlineNavigation": true,
+      "revokedStatus": 403
+    },
+    {
+      "label": "reopen-cache",
+      "firstPageMs": 3496,
+      "firstPageNetwork": {
+        "ranges": [
+          "bytes=0-1048575",
+          "bytes=208797696-208800121",
+          "bytes=208732160-208797695",
+          "bytes=1048576-1114111",
+          "bytes=1114112-1179647"
+        ],
+        "urls": [
+          "unyra-pdf://060f18d102844aefb77e4a46f07b328b/document.pdf",
+          "unyra-pdf://060f18d102844aefb77e4a46f07b328b/document.pdf",
+          "unyra-pdf://060f18d102844aefb77e4a46f07b328b/document.pdf",
+          "unyra-pdf://060f18d102844aefb77e4a46f07b328b/document.pdf",
+          "unyra-pdf://060f18d102844aefb77e4a46f07b328b/document.pdf"
+        ],
+        "requestedBytes": 1247610,
+        "fullRequests": 0
+      },
+      "preloadedMs": 85,
+      "jump500Ms": 3090,
+      "jump686Ms": 1975,
+      "jump500Timing": {
+        "pdfCanvas": "500",
+        "pdfReady": "true",
+        "pdfLoadMs": "2117",
+        "pdfRenderMs": "849"
+      },
+      "jump686Timing": {
+        "pdfCanvas": "686",
+        "pdfReady": "true",
+        "pdfLoadMs": "688",
+        "pdfRenderMs": "1139"
+      },
+      "mode": "range",
+      "darkPixelSamples": 6763,
+      "canvasCount": 4,
+      "maxCanvases": 4,
+      "oldReleased": true,
+      "pagePosition": 8.912498474121094,
+      "memory": {
+        "workingSetSize": 426044,
+        "peakWorkingSetSize": 434500,
+        "privateBytes": 393636
+      },
+      "stressMemory": [],
+      "indexed": [
+        {
+          "documentId": "45fd6f3f9a05e1b59cf38d43340680c2a6da5a7f731cabc71d670690564be67d",
+          "path": "D:\\BaiduNetdiskDownload\\实验心理学  第9版_坎特威茨.pdf",
+          "total": 686,
+          "indexed": 2
+        }
+      ],
+      "status": "页面渲染：已显示 · 当前页待解析后台识别 2/686 · 正在识别第 3 页暂停识别",
+      "base64Reads": 0,
+      "ocrCalls": 3,
+      "ownOcrPages": [
+        3
+      ],
+      "ownCachePages": [
+        1,
+        2
+      ],
+      "outlineNavigation": true,
+      "revokedStatus": 403
+    }
+  ],
+  "sample": "D:\\BaiduNetdiskDownload\\实验心理学  第9版_坎特威茨.pdf"
+}

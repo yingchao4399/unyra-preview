@@ -1,0 +1,277 @@
+{
+  "sample": "D:\\BaiduNetdiskDownload\\实验心理学  第9版_坎特威茨.pdf",
+  "runs": [
+    {
+      "label": "first-session",
+      "firstPageMs": 2303,
+      "firstPageTiming": {
+        "canvas": {
+          "pdfCanvas": "1",
+          "pdfReady": "true",
+          "pdfStartedAt": "1287",
+          "pdfLoadMs": "30",
+          "pdfRenderMs": "772"
+        },
+        "stages": [
+          {
+            "name": "fixture:module",
+            "ms": 429
+          },
+          {
+            "name": "fixture:plugins",
+            "ms": 438
+          },
+          {
+            "name": "fixture:render",
+            "ms": 441
+          },
+          {
+            "name": "worker:create",
+            "ms": 753
+          },
+          {
+            "name": "worker:ready",
+            "ms": 852
+          }
+        ],
+        "navigation": {
+          "name": "file:///D:/%E6%9C%BA%E6%A2%B0%E9%9D%A9%E5%91%BD%E4%BD%BF%E7%94%A8/codex%E6%96%B0%E5%BB%BA%E4%BD%BF%E7%94%A8/%E5%BD%92%E4%B8%80/node_modules/.tmp/pdf-acceptance/renderer/tests/fixtures/pdf-reader.html?sample=D%3A%5CBaiduNetdiskDownload%5C%E5%AE%9E%E9%AA%8C%E5%BF%83%E7%90%86%E5%AD%A6%20%20%E7%AC%AC9%E7%89%88_%E5%9D%8E%E7%89%B9%E5%A8%81%E8%8C%A8.pdf",
+          "entryType": "navigation",
+          "startTime": 0,
+          "duration": 434.10000002384186,
+          "navigationId": 5460,
+          "initiatorType": "navigation",
+          "deliveryType": "",
+          "nextHopProtocol": "",
+          "renderBlockingStatus": "non-blocking",
+          "contentType": "text/html",
+          "contentEncoding": "",
+          "workerStart": 0,
+          "workerRouterEvaluationStart": 0,
+          "workerCacheLookupStart": 0,
+          "workerMatchedSourceType": "",
+          "workerFinalSourceType": "",
+          "redirectStart": 0,
+          "redirectEnd": 0,
+          "fetchStart": 21.100000023841858,
+          "domainLookupStart": 21.100000023841858,
+          "domainLookupEnd": 21.100000023841858,
+          "connectStart": 21.100000023841858,
+          "secureConnectionStart": 0,
+          "connectEnd": 21.100000023841858,
+          "requestStart": 21.100000023841858,
+          "responseStart": 21.100000023841858,
+          "firstInterimResponseStart": 0,
+          "finalResponseHeadersStart": 0,
+          "responseEnd": 66.80000007152557,
+          "transferSize": 657,
+          "encodedBodySize": 357,
+          "decodedBodySize": 357,
+          "responseStatus": 200,
+          "serverTiming": [],
+          "unloadEventStart": 0,
+          "unloadEventEnd": 0,
+          "domInteractive": 139.80000007152557,
+          "domContentLoadedEventStart": 429.60000002384186,
+          "domContentLoadedEventEnd": 429.60000002384186,
+          "domComplete": 433.8000000715256,
+          "loadEventStart": 433.8000000715256,
+          "loadEventEnd": 434.10000002384186,
+          "type": "navigate",
+          "redirectCount": 0,
+          "activationStart": 0,
+          "criticalCHRestart": 0,
+          "notRestoredReasons": null,
+          "confidence": {}
+        }
+      },
+      "firstPageNetwork": {
+        "ranges": [
+          "bytes=0-1048575",
+          "bytes=208797696-208800121",
+          "bytes=208732160-208797695",
+          "bytes=1048576-1114111",
+          "bytes=1114112-1179647"
+        ],
+        "urls": [
+          "unyra-pdf://67d166c85cb74e6184010ee6a9d37f7e/document.pdf",
+          "unyra-pdf://67d166c85cb74e6184010ee6a9d37f7e/document.pdf",
+          "unyra-pdf://67d166c85cb74e6184010ee6a9d37f7e/document.pdf",
+          "unyra-pdf://67d166c85cb74e6184010ee6a9d37f7e/document.pdf",
+          "unyra-pdf://67d166c85cb74e6184010ee6a9d37f7e/document.pdf"
+        ],
+        "requestedBytes": 1247610,
+        "fullRequests": 0,
+        "timings": [
+          {
+            "range": "bytes=0-1048575",
+            "start": 703,
+            "headers": 728,
+            "end": 751
+          },
+          {
+            "range": "bytes=208797696-208800121",
+            "start": 866,
+            "headers": 915,
+            "end": 916
+          },
+          {
+            "range": "bytes=208732160-208797695",
+            "start": 918,
+            "headers": 1007,
+            "end": 1009
+          },
+          {
+            "range": "bytes=1048576-1114111",
+            "start": 1572,
+            "headers": 1577,
+            "end": 1578
+          },
+          {
+            "range": "bytes=1114112-1179647",
+            "start": 2162,
+            "headers": 2166,
+            "end": 2167
+          }
+        ]
+      }
+    },
+    {
+      "label": "reopen-cache",
+      "firstPageMs": 1571,
+      "firstPageTiming": {
+        "canvas": {
+          "pdfCanvas": "1",
+          "pdfReady": "true",
+          "pdfStartedAt": "771",
+          "pdfLoadMs": "10",
+          "pdfRenderMs": "634"
+        },
+        "stages": [
+          {
+            "name": "fixture:module",
+            "ms": 262
+          },
+          {
+            "name": "fixture:plugins",
+            "ms": 270
+          },
+          {
+            "name": "fixture:render",
+            "ms": 273
+          },
+          {
+            "name": "worker:create",
+            "ms": 438
+          },
+          {
+            "name": "worker:ready",
+            "ms": 521
+          }
+        ],
+        "navigation": {
+          "name": "file:///D:/%E6%9C%BA%E6%A2%B0%E9%9D%A9%E5%91%BD%E4%BD%BF%E7%94%A8/codex%E6%96%B0%E5%BB%BA%E4%BD%BF%E7%94%A8/%E5%BD%92%E4%B8%80/node_modules/.tmp/pdf-acceptance/renderer/tests/fixtures/pdf-reader.html?sample=D%3A%5CBaiduNetdiskDownload%5C%E5%AE%9E%E9%AA%8C%E5%BF%83%E7%90%86%E5%AD%A6%20%20%E7%AC%AC9%E7%89%88_%E5%9D%8E%E7%89%B9%E5%A8%81%E8%8C%A8.pdf",
+          "entryType": "navigation",
+          "startTime": 0,
+          "duration": 262.2999999523163,
+          "navigationId": 7723,
+          "initiatorType": "navigation",
+          "deliveryType": "",
+          "nextHopProtocol": "",
+          "renderBlockingStatus": "non-blocking",
+          "contentType": "text/html",
+          "contentEncoding": "",
+          "workerStart": 0,
+          "workerRouterEvaluationStart": 0,
+          "workerCacheLookupStart": 0,
+          "workerMatchedSourceType": "",
+          "workerFinalSourceType": "",
+          "redirectStart": 0,
+          "redirectEnd": 0,
+          "fetchStart": 46.59999990463257,
+          "domainLookupStart": 46.59999990463257,
+          "domainLookupEnd": 46.59999990463257,
+          "connectStart": 46.59999990463257,
+          "secureConnectionStart": 0,
+          "connectEnd": 46.59999990463257,
+          "requestStart": 46.59999990463257,
+          "responseStart": 46.59999990463257,
+          "firstInterimResponseStart": 0,
+          "finalResponseHeadersStart": 0,
+          "responseEnd": 63.89999997615814,
+          "transferSize": 657,
+          "encodedBodySize": 357,
+          "decodedBodySize": 357,
+          "responseStatus": 200,
+          "serverTiming": [],
+          "unloadEventStart": 0,
+          "unloadEventEnd": 0,
+          "domInteractive": 197.09999990463257,
+          "domContentLoadedEventStart": 262,
+          "domContentLoadedEventEnd": 262,
+          "domComplete": 262.09999990463257,
+          "loadEventStart": 262.09999990463257,
+          "loadEventEnd": 262.2999999523163,
+          "type": "navigate",
+          "redirectCount": 0,
+          "activationStart": 0,
+          "criticalCHRestart": 0,
+          "notRestoredReasons": null,
+          "confidence": {}
+        }
+      },
+      "firstPageNetwork": {
+        "ranges": [
+          "bytes=0-1048575",
+          "bytes=208797696-208800121",
+          "bytes=208732160-208797695",
+          "bytes=1048576-1114111",
+          "bytes=1114112-1179647"
+        ],
+        "urls": [
+          "unyra-pdf://cc6c7bb137c54965b93ac8947702c1e8/document.pdf",
+          "unyra-pdf://cc6c7bb137c54965b93ac8947702c1e8/document.pdf",
+          "unyra-pdf://cc6c7bb137c54965b93ac8947702c1e8/document.pdf",
+          "unyra-pdf://cc6c7bb137c54965b93ac8947702c1e8/document.pdf",
+          "unyra-pdf://cc6c7bb137c54965b93ac8947702c1e8/document.pdf"
+        ],
+        "requestedBytes": 1247610,
+        "fullRequests": 0,
+        "timings": [
+          {
+            "range": "bytes=0-1048575",
+            "start": 417,
+            "headers": 423,
+            "end": 436
+          },
+          {
+            "range": "bytes=208797696-208800121",
+            "start": 535,
+            "headers": 541,
+            "end": 542
+          },
+          {
+            "range": "bytes=208732160-208797695",
+            "start": 544,
+            "headers": 548,
+            "end": 549
+          },
+          {
+            "range": "bytes=1048576-1114111",
+            "start": 910,
+            "headers": 918,
+            "end": 929
+          },
+          {
+            "range": "bytes=1114112-1179647",
+            "start": 1470,
+            "headers": 1475,
+            "end": 1477
+          }
+        ]
+      }
+    }
+  ],
+  "firstSessionOcrCalls": 0,
+  "sourceSize": 208800122
+}
